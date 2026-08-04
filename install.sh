@@ -168,7 +168,7 @@ collect_config() {
     "local_path": "",
     "openvino_path": "models/hf/yolo26n_openvino_model",
     "prefer_openvino": true,
-    "auto_export_openvino": false,
+    "auto_export_openvino": true,
     "device": "intel:cpu",
     "imgsz": 640,
     "confidence": 0.25,
@@ -291,7 +291,7 @@ setup_python_env() {
 # Step 5: Python dependencies
 # ──────────────────────────────────────────────────────────────
 install_python_deps() {
-    log_step 5 "安裝 Python 依賴套件 (ultralytics, openvino, opencv...)..."
+    log_step 5 "安裝 Python 依賴套件 (ultralytics, OpenVINO, OpenCV...)..."
     log_info "這可能需要幾分鐘，請耐心等候..."
 
     sudo -u "${ACTUAL_USER}" bash -c "cd '${PROJECT_DIR}' && '${UV_BIN}' pip install --python '${VENV_DIR}/bin/python' -r requirements.txt" 2>&1 | tail -1

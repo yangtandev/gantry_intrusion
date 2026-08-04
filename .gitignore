@@ -27,6 +27,7 @@ saved_images/
 records/
 exhibition_shots/
 runs/
+models/hf/
 
 # Documentation
 *.docx

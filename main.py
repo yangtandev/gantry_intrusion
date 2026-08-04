@@ -114,6 +114,35 @@ def cleanup_runtime_outputs():
     cleanup_old_log_files()
 
 
+def cleanup_processes(processes, timeout=5):
+    previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        log.info("Cleaning up processes...")
+        deadline = time.time() + timeout
+        for process in processes:
+            process.join(timeout=max(0, deadline - time.time()))
+
+        for process in processes:
+            if process.is_alive():
+                log.warning("Process %s did not terminate gracefully. Terminating.", process.pid)
+                process.terminate()
+
+        for process in processes:
+            if process.is_alive():
+                process.join(timeout=2)
+    finally:
+        signal.signal(signal.SIGINT, previous_sigint)
+
+
+def install_shutdown_handlers(stop_event):
+    def request_shutdown(signum, _frame):
+        log.info("Shutdown signal %s received. Shutting down.", signum)
+        stop_event.set()
+
+    signal.signal(signal.SIGINT, request_shutdown)
+    signal.signal(signal.SIGTERM, request_shutdown)
+
+
 def save_image_with_limit(image, directory, folder_name, cam_id, limit=300):
     os.makedirs(directory, exist_ok=True)
     image_files = glob.glob(os.path.join(directory, "*.jpg")) + glob.glob(os.path.join(directory, "*.png"))
@@ -391,8 +420,10 @@ def resolve_model_source(model_config):
         return model_config["_resolved_model_source"], bool(model_config.get("_resolved_is_openvino", False))
 
     openvino_path = project_path(model_config.get("openvino_path"))
-    if model_config.get("prefer_openvino", True) and openvino_path and openvino_path.exists():
+    if model_config.get("prefer_openvino", True) and openvino_model_ready(openvino_path):
         return str(openvino_path), True
+    if model_config.get("prefer_openvino", True) and openvino_path and openvino_path.exists():
+        log.warning("OpenVINO path exists but is incomplete: %s", openvino_path)
 
     local_path = project_path(model_config.get("local_path"))
     if local_path and local_path.exists():
@@ -407,16 +438,40 @@ def resolve_model_source(model_config):
     return path, False
 
 
+def openvino_model_ready(path):
+    if not path or not path.is_dir():
+        return False
+    xml_files = list(path.glob("*.xml"))
+    if not xml_files:
+        return False
+    weights_path = xml_files[0].with_suffix(".bin")
+    if not weights_path.exists():
+        return False
+    try:
+        import openvino as ov
+
+        ov.Core().read_model(str(xml_files[0]), weights=str(weights_path))
+    except Exception:
+        return False
+    return True
+
+
 def maybe_export_openvino(model, model_source, model_config):
     openvino_path = project_path(model_config.get("openvino_path"))
-    if not model_config.get("auto_export_openvino", False) or not openvino_path or openvino_path.exists():
-        return str(openvino_path) if openvino_path and openvino_path.exists() else model_source
+    if not model_config.get("auto_export_openvino", False) or not openvino_path:
+        return model_source
+    if openvino_model_ready(openvino_path):
+        return str(openvino_path)
 
     exported = model.export(format="openvino", imgsz=int(model_config.get("imgsz", 640)), device="cpu")
     exported_path = Path(exported)
-    if exported_path.exists() and exported_path != openvino_path:
-        log.warning("OpenVINO exported to %s; update model.openvino_path if needed.", exported_path)
-    return str(exported_path)
+    if not openvino_model_ready(exported_path):
+        raise RuntimeError(f"OpenVINO export failed or is incomplete: {exported_path}")
+    if exported_path.resolve() != openvino_path.resolve():
+        openvino_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(exported_path, openvino_path, dirs_exist_ok=True)
+        log.info("OpenVINO exported to %s", openvino_path)
+    return str(openvino_path)
 
 
 def load_model(model_config, inference_threads):
@@ -435,6 +490,15 @@ def load_model(model_config, inference_threads):
     log.info("Model loaded: %s", model_source)
     log.info("Model classes: %s", ", ".join(f"{idx}:{name}" for idx, name in names.items()))
     return model, names, is_openvino
+
+
+def prepare_model_source(model_config, inference_threads):
+    model_source, is_openvino = resolve_model_source(model_config)
+    if is_openvino or not model_config.get("auto_export_openvino", False):
+        return model_source, is_openvino
+    limit_openvino_threads(inference_threads)
+    exported_source = maybe_export_openvino(YOLO(model_source), model_source, model_config)
+    return exported_source, openvino_model_ready(Path(exported_source))
 
 
 def normalized_names(model):
@@ -762,12 +826,13 @@ def main():
     frame_width = int(runtime_config.get("frame_width", 1280))
     frame_height = int(runtime_config.get("frame_height", 720))
     danger_zones = read_danger_zones(config, cameras, frame_width, frame_height)
-    model_source, is_openvino = resolve_model_source(model_config)
+    model_source, is_openvino = prepare_model_source(model_config, int(runtime_config.get("inference_threads", 0)))
     model_config["_resolved_model_source"] = model_source
     model_config["_resolved_is_openvino"] = is_openvino
 
     display_queue = Queue(maxsize=len(cameras) * 2)
     stop_event = Event()
+    install_shutdown_handlers(stop_event)
 
     log.info("Recording: %s", "enabled" if enable_recording else "disabled")
     log.info("Display: %s", "enabled" if display_enabled else "disabled")
@@ -841,19 +906,7 @@ def main():
         stop_event.set()
 
     finally:
-        log.info("Cleaning up processes...")
-        deadline = time.time() + 5
-        for process in processes:
-            process.join(timeout=max(0, deadline - time.time()))
-
-        for process in processes:
-            if process.is_alive():
-                log.warning("Process %s did not terminate gracefully. Terminating.", process.pid)
-                process.terminate()
-
-        for process in processes:
-            if process.is_alive():
-                process.join(timeout=2)
+        cleanup_processes(processes)
 
         if display_enabled:
             cv2.destroyAllWindows()

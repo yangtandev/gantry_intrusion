@@ -22,7 +22,7 @@ Default model source:
 - Hugging Face repo: `yihong1120/Construction-Hazard-Detection`
 - Default weight: `models/yolo26/pt/yolo26n.pt`
 - Runtime: Ultralytics YOLO
-- CPU path: PyTorch first run, OpenVINO preferred when `models/hf/yolo26n_openvino_model/` exists
+- CPU path: auto-export OpenVINO on first run, then prefer `models/hf/yolo26n_openvino_model/`
 
 Model classes:
 
@@ -165,6 +165,6 @@ python tools/self_check.py
 ## Notes
 
 - First run needs network to download the Hugging Face `.pt` model unless `model.local_path` points to a local file.
-- OpenVINO export is recommended for CPU deployment.
+- First run also exports OpenVINO to `models/hf/yolo26n_openvino_model/`; later runs load that directory directly.
 - `NO-Hardhat`, `NO-Mask`, and `NO-Safety Vest` are PPE findings, not intrusion by default.
 - The model license is AGPL-3.0. Confirm license fit before production/commercial deployment.

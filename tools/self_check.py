@@ -1,5 +1,6 @@
 from pathlib import Path
 import datetime
+import signal
 import sys
 import tempfile
 
@@ -8,10 +9,45 @@ sys.path.insert(0, str(ROOT))
 
 from shapely.geometry import Polygon
 
-from main import bbox_matches_danger_zone, cleanup_date_dirs, passes_class_and_filter, read_danger_zones
+from main import (
+    bbox_matches_danger_zone,
+    cleanup_processes,
+    cleanup_date_dirs,
+    install_shutdown_handlers,
+    openvino_model_ready,
+    passes_class_and_filter,
+    read_danger_zones,
+)
 
 
 def main():
+    class DoneProcess:
+        pid = 1
+
+        def join(self, timeout=None):
+            signal.raise_signal(signal.SIGINT)
+
+        def is_alive(self):
+            return False
+
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    cleanup_processes([DoneProcess()], timeout=0.01)
+    assert signal.getsignal(signal.SIGINT) == previous_sigint
+
+    class StopEvent:
+        stopped = False
+
+        def set(self):
+            self.stopped = True
+
+    stop_event = StopEvent()
+    install_shutdown_handlers(stop_event)
+    signal.raise_signal(signal.SIGTERM)
+    assert stop_event.stopped
+    signal.signal(signal.SIGINT, previous_sigint)
+    signal.signal(signal.SIGTERM, previous_sigterm)
+
     zone = Polygon([(0, 0), (100, 0), (100, 100), (0, 100)])
     contact_filter = {"mode": "bottom_line", "line_width_ratio": 0.8, "bottom_offset_ratio": 0.0}
     overlap_filter = {"mode": "overlap", "min_bbox_overlap_ratio": 0.15}
@@ -52,6 +88,18 @@ def main():
         assert (root / "20260730").exists()
         assert not (root / "20260729").exists()
         assert (root / "misc").exists()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        model_dir = Path(tmp)
+        assert not openvino_model_ready(model_dir)
+        (model_dir / "model.xml").write_text("<xml />", encoding="utf-8")
+        assert not openvino_model_ready(model_dir)
+        (model_dir / "model.bin").write_bytes(b"bin")
+        assert not openvino_model_ready(model_dir)
+
+    real_openvino_model = ROOT / "models" / "hf" / "yolo26n_openvino_model"
+    if real_openvino_model.exists():
+        assert openvino_model_ready(real_openvino_model)
 
     print("self_check ok")
 

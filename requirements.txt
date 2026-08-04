@@ -1,0 +1,9 @@
+numpy
+opencv-python
+Pillow
+openvino
+openvino-dev
+ultralytics>=8.3.0
+shapely
+requests
+huggingface-hub

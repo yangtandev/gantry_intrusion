@@ -1,0 +1,33 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environments
+.venv/
+venv/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+yolov10-optimization.ipynb
+
+# Build and distribution
+build/
+dist/
+*.egg-info/
+
+# Log and data files
+config.json
+logs/
+log/
+img_log/
+*.log
+saved_images/
+records/
+exhibition_shots/
+runs/
+
+# Documentation
+*.docx
+handover_notes.md

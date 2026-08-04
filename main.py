@@ -509,9 +509,9 @@ def normalized_names(model):
 
 
 def warn_unknown_classes(names, class_config):
-    available = set(names.values())
+    available = normalized_class_set(names.values())
     for key in ("intrusion", "ignore", "mask"):
-        missing = sorted(set(class_config.get(key, [])) - available)
+        missing = sorted(label for label in class_config.get(key, []) if normalize_class_label(label) not in available)
         if missing:
             log.warning("Configured classes not in model.%s: %s", key, ", ".join(missing))
 
@@ -520,19 +520,36 @@ def class_name(names, class_id):
     return names.get(int(class_id), str(int(class_id)))
 
 
+def normalize_class_label(label):
+    return str(label).strip().casefold()
+
+
+def normalized_class_set(labels):
+    return {normalize_class_label(label) for label in labels}
+
+
+def configured_min_confidence(label, filter_config):
+    normalized_label = normalize_class_label(label)
+    for configured_label, min_conf in filter_config.get("min_confidence_by_class", {}).items():
+        if normalize_class_label(configured_label) == normalized_label:
+            return float(min_conf)
+    return 0.0
+
+
 def xyxy_list(box_item):
     return [float(x) for x in box_item.xyxy[0]]
 
 
 def passes_class_and_filter(bbox, class_label, conf, frame_shape, class_config, filter_config):
-    if class_label in set(class_config.get("ignore", [])):
+    normalized_label = normalize_class_label(class_label)
+    if normalized_label in normalized_class_set(class_config.get("ignore", [])):
         return False
 
-    intrusion_classes = set(class_config.get("intrusion", []))
-    if intrusion_classes and class_label not in intrusion_classes:
+    intrusion_classes = normalized_class_set(class_config.get("intrusion", []))
+    if intrusion_classes and normalized_label not in intrusion_classes:
         return False
 
-    min_conf = float(filter_config.get("min_confidence_by_class", {}).get(class_label, 0.0))
+    min_conf = configured_min_confidence(class_label, filter_config)
     if conf < min_conf:
         return False
 
@@ -633,7 +650,7 @@ def camera_process_worker(
     mask_history_bboxes = []
     mask_history_ttl = 0
     mask_overlap = filter_config.get("mask_overlap", {})
-    mask_classes = set(class_config.get("mask", []))
+    mask_classes = normalized_class_set(class_config.get("mask", []))
     mask_ttl_frames = int(mask_overlap.get("ttl_frames", 0))
 
     try:
@@ -699,7 +716,7 @@ def camera_process_worker(
                 current_mask_bboxes = [
                     xyxy_list(result)
                     for result in results.boxes
-                    if class_name(names, int(result.cls[0])) in mask_classes
+                    if normalize_class_label(class_name(names, int(result.cls[0]))) in mask_classes
                 ]
                 if current_mask_bboxes:
                     mask_history_bboxes = current_mask_bboxes

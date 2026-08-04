@@ -65,11 +65,11 @@ def main():
     assert config_zone.area == 10000
 
     class_config = {
-        "intrusion": ["Person", "Vehicle"],
+        "intrusion": ["Person", "Vehicle", "Machinery"],
         "ignore": ["Hardhat"],
     }
     filter_config = {
-        "min_confidence_by_class": {"Person": 0.3},
+        "min_confidence_by_class": {"Person": 0.3, "Machinery": 0.3},
         "max_bbox_size": {"enabled": False},
         "edge_confidence": {"enabled": False},
     }
@@ -77,7 +77,9 @@ def main():
     assert passes_class_and_filter([10, 10, 50, 50], "Person", 0.31, frame_shape, class_config, filter_config)
     assert not passes_class_and_filter([10, 10, 50, 50], "Person", 0.29, frame_shape, class_config, filter_config)
     assert not passes_class_and_filter([10, 10, 50, 50], "Hardhat", 0.99, frame_shape, class_config, filter_config)
-    assert not passes_class_and_filter([10, 10, 50, 50], "Machinery", 0.99, frame_shape, class_config, filter_config)
+    assert passes_class_and_filter([10, 10, 50, 50], "machinery", 0.31, frame_shape, class_config, filter_config)
+    assert not passes_class_and_filter([10, 10, 50, 50], "machinery", 0.29, frame_shape, class_config, filter_config)
+    assert not passes_class_and_filter([10, 10, 50, 50], "unknown", 0.99, frame_shape, class_config, filter_config)
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)

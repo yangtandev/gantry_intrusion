@@ -60,7 +60,7 @@ Default runtime config reads 1920x1080/15 FPS camera streams, resizes frames to 
 - `model.openvino_path`: local OpenVINO export path
 - `classes.intrusion`: classes that can trigger zone intrusion
 - `classes.ignore`: detected classes ignored for intrusion
-- `filters.*`: optional size/edge/mask/zone contact filters
+- `filters.*`: optional size/edge/mask/duplicate/zone contact filters
 - `zones.regions.{camera_id}`: normalized danger-zone polygon points
 - `cameras[].rtsp_url`: RTSP URL
 - `cameras[].alert_device_ip`: optional GPIO alarm endpoint host

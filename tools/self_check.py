@@ -13,6 +13,7 @@ from main import (
     bbox_matches_danger_zone,
     cleanup_processes,
     cleanup_date_dirs,
+    deduplicate_overlapping_detections,
     install_shutdown_handlers,
     openvino_model_ready,
     passes_class_and_filter,
@@ -80,6 +81,16 @@ def main():
     assert passes_class_and_filter([10, 10, 50, 50], "machinery", 0.31, frame_shape, class_config, filter_config)
     assert not passes_class_and_filter([10, 10, 50, 50], "machinery", 0.29, frame_shape, class_config, filter_config)
     assert not passes_class_and_filter([10, 10, 50, 50], "unknown", 0.99, frame_shape, class_config, filter_config)
+
+    dedup_bboxes, dedup_labels, dedup_confidences = deduplicate_overlapping_detections(
+        [[10, 10, 60, 60], [12, 12, 58, 58], [12, 12, 58, 58]],
+        ["machinery", "Machinery", "Person"],
+        [0.8, 0.9, 0.7],
+        {"enabled": True, "max_overlap_ratio": 0.8},
+    )
+    assert dedup_bboxes == [[12, 12, 58, 58], [12, 12, 58, 58]]
+    assert dedup_labels == ["Machinery", "Person"]
+    assert dedup_confidences == [0.9, 0.7]
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)

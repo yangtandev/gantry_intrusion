@@ -200,6 +200,10 @@ collect_config() {
       "max_overlap_ratio": 0.8,
       "ttl_frames": 15
     },
+    "duplicate_bbox": {
+      "enabled": true,
+      "max_overlap_ratio": 0.8
+    },
     "danger_zone_overlap": {
       "mode": "bottom_line",
       "line_width_ratio": 0.8,

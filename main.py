@@ -333,6 +333,47 @@ def calculate_overlap_ratio(bbox1, bbox2):
     return intersection_area / bbox1_area if bbox1_area else 0.0
 
 
+def bbox_area(bbox):
+    width = max(0.0, bbox[2] - bbox[0])
+    height = max(0.0, bbox[3] - bbox[1])
+    return width * height
+
+
+def calculate_min_overlap_ratio(bbox1, bbox2):
+    x1_1, y1_1, x2_1, y2_1 = bbox1
+    x1_2, y1_2, x2_2, y2_2 = bbox2
+    inter_x1 = max(x1_1, x1_2)
+    inter_y1 = max(y1_1, y1_2)
+    inter_x2 = min(x2_1, x2_2)
+    inter_y2 = min(y2_1, y2_2)
+    if inter_x1 >= inter_x2 or inter_y1 >= inter_y2:
+        return 0.0
+    min_area = min(bbox_area(bbox1), bbox_area(bbox2))
+    if min_area <= 0:
+        return 0.0
+    return ((inter_x2 - inter_x1) * (inter_y2 - inter_y1)) / min_area
+
+
+def deduplicate_overlapping_detections(bboxes, labels, confidences, duplicate_config):
+    if not duplicate_config.get("enabled", False):
+        return bboxes, labels, confidences
+
+    max_overlap_ratio = float(duplicate_config.get("max_overlap_ratio", 0.8))
+    kept = []
+    for index in sorted(range(len(bboxes)), key=lambda i: confidences[i], reverse=True):
+        label = normalize_class_label(labels[index])
+        if any(
+            label == normalize_class_label(labels[kept_index])
+            and calculate_min_overlap_ratio(bboxes[index], bboxes[kept_index]) > max_overlap_ratio
+            for kept_index in kept
+        ):
+            continue
+        kept.append(index)
+
+    kept.sort()
+    return [bboxes[i] for i in kept], [labels[i] for i in kept], [confidences[i] for i in kept]
+
+
 def draw_transparent_polygon(image, points, color=(0, 0, 255), opacity=0.3):
     overlay = image.copy()
     output = image.copy()
@@ -749,6 +790,14 @@ def camera_process_worker(
                     candidate_bboxes.append(bbox)
                     candidate_labels.append(label)
                     candidate_confidences.append(conf)
+
+                duplicate_config = filter_config.get("duplicate_bbox", {})
+                candidate_bboxes, candidate_labels, candidate_confidences = deduplicate_overlapping_detections(
+                    candidate_bboxes,
+                    candidate_labels,
+                    candidate_confidences,
+                    duplicate_config,
+                )
 
                 danger_filter = filter_config.get("danger_zone_overlap", {})
                 intrusion_bboxes = [

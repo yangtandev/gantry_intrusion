@@ -56,6 +56,7 @@ Configured in `config.json`:
 - `filters.max_bbox_size`
 - `filters.edge_confidence`
 - `filters.mask_overlap`
+- `filters.duplicate_bbox`
 - `filters.danger_zone_overlap`
 
 Default zone mode is `bottom_line` with `line_width_ratio=0.8`, so only the middle 80% of the detection box bottom edge needs to touch the drawn polygon. Use `mode=overlap` to return to area-overlap behavior.

@@ -62,15 +62,13 @@ Default runtime config reads 1920x1080/15 FPS camera streams, resizes frames to 
 - `classes.ignore`: detected classes ignored for intrusion
 - `filters.*`: optional size/edge/mask/duplicate/zone contact filters
 - `zones.regions.{camera_id}`: normalized danger-zone polygon points
-- `alert_voice_text`: optional shared voice broadcast text, defaults to `天車行進區，請盡速離開`
 - `cameras[].rtsp_url`: RTSP URL
 - `cameras[].alert_device_ip`: optional voice broadcast device host
 - `cameras[].location_id`: API location id
 
-Shared alert settings, camera settings, and danger zones are stored in `config.json`; zone points use normalized `[x, y]` coordinates:
+Camera settings and danger zones are stored in `config.json`; zone points use normalized `[x, y]` coordinates:
 
 ```json
-"alert_voice_text": "天車行進區，請盡速離開",
 "cameras": [
   {
     "id": "camera_1",

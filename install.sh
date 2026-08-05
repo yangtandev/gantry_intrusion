@@ -92,9 +92,6 @@ collect_config() {
         enable_recording="true"
     fi
 
-    read -p "  廣播語音文字 [天車行進區，請盡速離開]: " input_alert_voice_text
-    local alert_voice_text="${input_alert_voice_text:-天車行進區，請盡速離開}"
-
     # --- Cameras ---
     echo ""
     echo -e "  ${BOLD}攝影機設定${NC}（至少需設定一台，輸入空白 ID 結束）:"
@@ -152,7 +149,6 @@ collect_config() {
   "api_url": "${api_url}",
   "enable_recording": ${enable_recording},
   "cooldown_seconds": 5,
-  "alert_voice_text": "${alert_voice_text}",
   "display": {
     "enabled": true
   },

@@ -33,7 +33,6 @@ PROJECT_DIR = Path(__file__).resolve().parent
 IMG_LOG_DIR = PROJECT_DIR / "img_log"
 LOG_DIR = PROJECT_DIR / "log"
 RETENTION_DAYS = 7
-DEFAULT_ALERT_VOICE_TEXT = "天車行進區，請盡速離開"
 
 os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
 os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8"
@@ -474,7 +473,6 @@ def handle_alert_in_background(
     cam_id,
     api_url,
     alert_device_ip,
-    alert_voice_text,
     location_id,
     raw_frame=None,
     debug_info=None,
@@ -485,16 +483,10 @@ def handle_alert_in_background(
         try:
             response = requests.get(
                 f"http://{alert_device_ip}:5005/sayloudly",
-                params={"leve": "voice1"},
+                params={"leve": "voice1", "lang": "vi,th"},
                 timeout=2,
             )
             message = response.json().get("message") if response.content else ""
-            if message == "No audio to play":
-                requests.get(
-                    f"http://{alert_device_ip}:5005/sayloudly",
-                    params={"leve": "voice1", "text": alert_voice_text},
-                    timeout=2,
-                )
             log.info("[%s] Voice alert requested: %s", cam_id, message or response.status_code)
         except requests.exceptions.RequestException as e:
             log.error("[%s] Failed to trigger voice alert: %s", cam_id, e)
@@ -704,7 +696,6 @@ def camera_process_worker(
     api_url,
     enable_recording,
     cooldown_seconds,
-    alert_voice_text,
     runtime_config,
     model_config,
     class_config,
@@ -918,7 +909,6 @@ def camera_process_worker(
                             cam_id,
                             api_url,
                             alert_device_ip,
-                            alert_voice_text,
                             location_id,
                             frame.copy(),
                             debug_info,
@@ -967,7 +957,6 @@ def main():
     api_url = config.get("api_url", "")
     enable_recording = bool(config.get("enable_recording", False))
     cooldown_seconds = float(config.get("cooldown_seconds", 5))
-    alert_voice_text = config.get("alert_voice_text", DEFAULT_ALERT_VOICE_TEXT)
     display_enabled = bool(config.get("display", {}).get("enabled", True))
     runtime_config = config.get("runtime", {})
     model_config = dict(config.get("model", {}))
@@ -1008,7 +997,6 @@ def main():
                 api_url,
                 enable_recording,
                 cooldown_seconds,
-                alert_voice_text,
                 runtime_config,
                 model_config,
                 class_config,

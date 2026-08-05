@@ -82,6 +82,7 @@ Danger zones are stored in `config.json` with normalized `[x, y]` points:
 ```
 
 Use `tools/calibrate_zone.py` to draw/edit camera zones.
+Configured cameras without a zone still display live detections, but do not alert until a zone exists. Saving a zone to `config.json` is picked up automatically while the app is running.
 
 Draw from the current RTSP frame:
 

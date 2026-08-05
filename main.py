@@ -130,6 +130,12 @@ def cleanup_processes(processes, timeout=5):
         for process in processes:
             if process.is_alive():
                 process.join(timeout=2)
+
+        for process in processes:
+            if process.is_alive():
+                log.warning("Process %s did not terminate. Killing.", process.pid)
+                process.kill()
+                process.join(timeout=2)
     finally:
         signal.signal(signal.SIGINT, previous_sigint)
 
@@ -213,8 +219,7 @@ def read_legacy_area_file(file_path):
 
 def polygon_from_points(points, source):
     if len(points) < 3:
-        log.error("%s needs at least 3 danger-zone points.", source)
-        sys.exit(1)
+        raise ValueError(f"{source} needs at least 3 danger-zone points.")
 
     polygon = Polygon(points)
     if not polygon.is_valid:
@@ -226,27 +231,72 @@ def polygon_from_points(points, source):
             polygon = fixed
             log.warning("%s polygon invalid; repaired for runtime use.", source)
         else:
-            log.error("%s polygon invalid and cannot be repaired.", source)
-            sys.exit(1)
+            raise ValueError(f"{source} polygon invalid and cannot be repaired.")
     return polygon
 
 
-def read_danger_zones(config, cameras, frame_width, frame_height):
+def read_camera_danger_zone(config, camera, frame_width, frame_height, required=True, log_missing=True):
     regions = config.get("zones", {}).get("regions", {})
+    cam_id = camera["id"]
+    points = denormalized_points(regions.get(cam_id), frame_width, frame_height)
+    source = f"config.json zones.regions.{cam_id}"
+    if not points:
+        legacy_path = PROJECT_DIR / "mask" / f"{cam_id}.txt"
+        points = read_legacy_area_file(legacy_path)
+        source = str(legacy_path)
+    if not points:
+        message = f"Missing danger zone for camera {cam_id}. Run tools/calibrate_zone.py {cam_id}"
+        if required:
+            log.error(message)
+            sys.exit(1)
+        if log_missing:
+            log.warning(message)
+        return None
+    try:
+        return polygon_from_points(points, source)
+    except ValueError as e:
+        if required:
+            log.error("%s", e)
+            sys.exit(1)
+        log.warning("%s", e)
+        return None
+
+
+def read_danger_zones(config, cameras, frame_width, frame_height, required=True):
     polygons = []
     for camera in cameras:
-        cam_id = camera["id"]
-        points = denormalized_points(regions.get(cam_id), frame_width, frame_height)
-        source = f"config.json zones.regions.{cam_id}"
-        if not points:
-            legacy_path = PROJECT_DIR / "mask" / f"{cam_id}.txt"
-            points = read_legacy_area_file(legacy_path)
-            source = str(legacy_path)
-        if not points:
-            log.error("Missing danger zone for camera %s. Run tools/calibrate_zone.py %s", cam_id, cam_id)
-            sys.exit(1)
-        polygons.append(polygon_from_points(points, source))
+        polygons.append(read_camera_danger_zone(config, camera, frame_width, frame_height, required=required))
     return polygons
+
+
+def maybe_reload_danger_zone(cam_config, danger_zone, frame_width, frame_height, last_reload_time, reload_seconds=5):
+    now = time.time()
+    if now - last_reload_time < reload_seconds:
+        return danger_zone, last_reload_time
+
+    last_reload_time = now
+    try:
+        config = load_config()
+        reloaded_zone = read_camera_danger_zone(
+            config,
+            cam_config,
+            frame_width,
+            frame_height,
+            required=False,
+            log_missing=False,
+        )
+    except Exception as e:
+        log.warning("[%s] Failed to reload danger zone: %s", cam_config["id"], e)
+        return danger_zone, last_reload_time
+
+    if reloaded_zone is None:
+        if danger_zone is not None:
+            log.warning("[%s] Danger zone removed; display only until zone is configured.", cam_config["id"])
+        return None, last_reload_time
+
+    if danger_zone is None or not danger_zone.equals_exact(reloaded_zone, tolerance=0.01):
+        log.info("[%s] Danger zone loaded/reloaded.", cam_config["id"])
+    return reloaded_zone, last_reload_time
 
 
 def bbox_in_danger_zone(danger_area_polygon, bbox, min_overlap_ratio=0.15, bottom_check_enabled=False, bottom_margin_ratio=0.1):
@@ -639,6 +689,7 @@ def camera_process_worker(
     filter_config,
 ):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
 
     cam_id = cam_config["id"]
     rtsp_link = cam_config["rtsp_url"]
@@ -673,6 +724,7 @@ def camera_process_worker(
     model, names, is_openvino = load_model(model_config, inference_threads)
     warn_unknown_classes(names, class_config)
     device = prediction_device(model_config, is_openvino)
+    last_zone_reload_time = time.time()
 
     last_alert_time = 0
     frame_interval = 1.0 / inference_fps if inference_fps > 0 else 0
@@ -743,6 +795,13 @@ def camera_process_worker(
                 last_no_frame_log = 0
 
                 frame = cv2.resize(frame, (frame_width, frame_height))
+                danger_zone, last_zone_reload_time = maybe_reload_danger_zone(
+                    cam_config,
+                    danger_zone,
+                    frame_width,
+                    frame_height,
+                    last_zone_reload_time,
+                )
                 predict_args = {
                     "source": frame,
                     "iou": float(model_config.get("iou", 0.5)),
@@ -800,11 +859,13 @@ def camera_process_worker(
                 )
 
                 danger_filter = filter_config.get("danger_zone_overlap", {})
-                intrusion_bboxes = [
-                    bbox
-                    for bbox in candidate_bboxes
-                    if bbox_matches_danger_zone(danger_zone, bbox, danger_filter)
-                ]
+                intrusion_bboxes = []
+                if danger_zone is not None:
+                    intrusion_bboxes = [
+                        bbox
+                        for bbox in candidate_bboxes
+                        if bbox_matches_danger_zone(danger_zone, bbox, danger_filter)
+                    ]
 
                 is_intrusion = bool(intrusion_bboxes)
                 current_time = time.time()
@@ -891,7 +952,7 @@ def main():
     active_camera_ids = [cam["id"] for cam in cameras]
     frame_width = int(runtime_config.get("frame_width", 1280))
     frame_height = int(runtime_config.get("frame_height", 720))
-    danger_zones = read_danger_zones(config, cameras, frame_width, frame_height)
+    danger_zones = read_danger_zones(config, cameras, frame_width, frame_height, required=False)
     model_source, is_openvino = prepare_model_source(model_config, int(runtime_config.get("inference_threads", 0)))
     model_config["_resolved_model_source"] = model_source
     model_config["_resolved_is_openvino"] = is_openvino

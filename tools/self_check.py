@@ -36,6 +36,30 @@ def main():
     cleanup_processes([DoneProcess()], timeout=0.01)
     assert signal.getsignal(signal.SIGINT) == previous_sigint
 
+    class StubbornProcess:
+        pid = 2
+
+        def __init__(self):
+            self.terminated = False
+            self.killed = False
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return not self.killed
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.killed = True
+
+    stubborn = StubbornProcess()
+    cleanup_processes([stubborn], timeout=0.01)
+    assert stubborn.terminated
+    assert stubborn.killed
+
     class StopEvent:
         stopped = False
 
@@ -64,6 +88,7 @@ def main():
         100,
     )[0]
     assert config_zone.area == 10000
+    assert read_danger_zones({"zones": {"regions": {}}}, [{"id": "missing"}], 100, 100, required=False) == [None]
 
     class_config = {
         "intrusion": ["Person", "Vehicle", "Machinery"],

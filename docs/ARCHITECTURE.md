@@ -14,7 +14,7 @@ Detect `Person`, `Machinery`, and `Vehicle` objects entering configured gantry-c
 6. Resize frames to `runtime.frame_width` x `runtime.frame_height`.
 7. Run inference at `runtime.inference_fps`.
 8. Filter detections by configured class names and confidence.
-9. Check each detection box bottom contact line against `zones.regions.{camera_id}` from `config.json`.
+9. Check each detection box bottom contact line against `zones.regions.{camera_id}` from `config.json`; cameras without zones remain display-only and reload zones from config while running.
 10. Save alert images/debug JSON under `img_log/YYYYMMDD/`, trigger optional GPIO HTTP alarm, post optional API log.
 11. Write text logs under `log/`.
 12. Clean runtime outputs older than seven days every hour.

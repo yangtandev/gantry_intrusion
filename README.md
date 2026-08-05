@@ -2,7 +2,7 @@
 
 Gantry crane restricted-zone intrusion detection for two RTSP cameras.
 
-The app detects configured object classes inside per-camera polygon zones, saves alert images/debug JSON, triggers an optional GPIO HTTP alarm, and posts intrusion logs to an API.
+The app detects configured object classes inside per-camera polygon zones, saves alert images/debug JSON, triggers an optional HTTP voice alert, and posts intrusion logs to an API.
 
 ## Directories
 
@@ -62,13 +62,23 @@ Default runtime config reads 1920x1080/15 FPS camera streams, resizes frames to 
 - `classes.ignore`: detected classes ignored for intrusion
 - `filters.*`: optional size/edge/mask/duplicate/zone contact filters
 - `zones.regions.{camera_id}`: normalized danger-zone polygon points
+- `alert_voice_text`: optional shared voice broadcast text, defaults to `天車行進區，請盡速離開`
 - `cameras[].rtsp_url`: RTSP URL
-- `cameras[].alert_device_ip`: optional GPIO alarm endpoint host
+- `cameras[].alert_device_ip`: optional voice broadcast device host
 - `cameras[].location_id`: API location id
 
-Danger zones are stored in `config.json` with normalized `[x, y]` points:
+Shared alert settings, camera settings, and danger zones are stored in `config.json`; zone points use normalized `[x, y]` coordinates:
 
 ```json
+"alert_voice_text": "天車行進區，請盡速離開",
+"cameras": [
+  {
+    "id": "camera_1",
+    "rtsp_url": "rtsp://user:password@192.168.1.101:554/stream1",
+    "alert_device_ip": "192.168.1.189",
+    "location_id": 1
+  }
+],
 "zones": {
   "regions": {
     "wb02_left": [

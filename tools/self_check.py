@@ -11,12 +11,15 @@ from shapely.geometry import Polygon
 
 from main import (
     bbox_matches_danger_zone,
+    clamp_zone_crop_box,
     cleanup_processes,
     cleanup_date_dirs,
     deduplicate_overlapping_detections,
+    deduplicate_overlapping_detections_with_metadata,
     install_shutdown_handlers,
     openvino_model_ready,
     passes_class_and_filter,
+    polygon_debug_points,
     read_danger_zones,
 )
 
@@ -80,6 +83,10 @@ def main():
     assert not bbox_matches_danger_zone(zone, [10, 110, 50, 150], contact_filter)
     assert bbox_matches_danger_zone(zone, [10, 10, 50, 50], overlap_filter)
     assert not bbox_matches_danger_zone(zone, [90, 90, 190, 190], overlap_filter)
+    assert clamp_zone_crop_box(zone, (100, 100, 3), 0.25) == [0, 0, 100, 100]
+    assert polygon_debug_points(zone) == [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0], [0.0, 0.0]]
+    flat_zone = Polygon([(40, 80), (140, 80), (140, 90), (40, 90)])
+    assert clamp_zone_crop_box(flat_zone, (200, 200, 3), 0.25) == [15, 55, 165, 115]
 
     config_zone = read_danger_zones(
         {"zones": {"regions": {"cam": [[0, 0], [1, 0], [1, 1], [0, 1]]}}},
@@ -116,6 +123,14 @@ def main():
     assert dedup_bboxes == [[12, 12, 58, 58], [12, 12, 58, 58]]
     assert dedup_labels == ["Machinery", "Person"]
     assert dedup_confidences == [0.9, 0.7]
+    _, _, _, dedup_sources = deduplicate_overlapping_detections_with_metadata(
+        [[10, 10, 60, 60], [12, 12, 58, 58], [12, 12, 58, 58]],
+        ["machinery", "Machinery", "Person"],
+        [0.8, 0.9, 0.7],
+        ["full_frame", "zone_crop", "full_frame"],
+        {"enabled": True, "max_overlap_ratio": 0.8},
+    )
+    assert dedup_sources == ["zone_crop", "full_frame"]
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)

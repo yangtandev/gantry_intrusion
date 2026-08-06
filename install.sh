@@ -204,6 +204,15 @@ collect_config() {
       "enabled": true,
       "max_overlap_ratio": 0.8
     },
+    "zone_crop_detection": {
+      "enabled": false,
+      "classes": ["Person"],
+      "padding_ratio": 0.25,
+      "confidence": 0.05,
+      "min_confidence_by_class": {
+        "Person": 0.2
+      }
+    },
     "danger_zone_overlap": {
       "mode": "bottom_line",
       "line_width_ratio": 0.8,

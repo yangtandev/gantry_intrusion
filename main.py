@@ -405,8 +405,19 @@ def calculate_min_overlap_ratio(bbox1, bbox2):
 
 
 def deduplicate_overlapping_detections(bboxes, labels, confidences, duplicate_config):
+    dedup_bboxes, dedup_labels, dedup_confidences, _ = deduplicate_overlapping_detections_with_metadata(
+        bboxes,
+        labels,
+        confidences,
+        [None] * len(bboxes),
+        duplicate_config,
+    )
+    return dedup_bboxes, dedup_labels, dedup_confidences
+
+
+def deduplicate_overlapping_detections_with_metadata(bboxes, labels, confidences, metadata, duplicate_config):
     if not duplicate_config.get("enabled", False):
-        return bboxes, labels, confidences
+        return bboxes, labels, confidences, metadata
 
     max_overlap_ratio = float(duplicate_config.get("max_overlap_ratio", 0.8))
     kept = []
@@ -421,7 +432,7 @@ def deduplicate_overlapping_detections(bboxes, labels, confidences, duplicate_co
         kept.append(index)
 
     kept.sort()
-    return [bboxes[i] for i in kept], [labels[i] for i in kept], [confidences[i] for i in kept]
+    return [bboxes[i] for i in kept], [labels[i] for i in kept], [confidences[i] for i in kept], [metadata[i] for i in kept]
 
 
 def draw_transparent_polygon(image, points, color=(0, 0, 255), opacity=0.3):
@@ -443,6 +454,22 @@ def draw_transparent_polygon(image, points, color=(0, 0, 255), opacity=0.3):
         cv2.fillPoly(overlay, [np.array(points, dtype=np.int32)], color)
         cv2.addWeighted(overlay, opacity, output, 1 - opacity, 0, output)
     return output
+
+
+def polygon_debug_points(points):
+    if points is None:
+        return None
+    if hasattr(points, "geoms"):
+        return [
+            [[float(x), float(y)] for x, y in geom.exterior.coords]
+            for geom in points.geoms
+            if geom.geom_type == "Polygon"
+        ]
+    if hasattr(points, "exterior"):
+        points = points.exterior
+    if hasattr(points, "coords"):
+        return [[float(x), float(y)] for x, y in points.coords]
+    return None
 
 
 def draw_detection_boxes(image, bboxes, labels, confidences, color=(0, 255, 0)):
@@ -640,8 +667,107 @@ def configured_min_confidence(label, filter_config):
     return 0.0
 
 
+def configured_crop_min_confidence(label, crop_config, filter_config):
+    normalized_label = normalize_class_label(label)
+    for configured_label, min_conf in crop_config.get("min_confidence_by_class", {}).items():
+        if normalize_class_label(configured_label) == normalized_label:
+            return float(min_conf)
+    return configured_min_confidence(label, filter_config)
+
+
 def xyxy_list(box_item):
     return [float(x) for x in box_item.xyxy[0]]
+
+
+def clamp_zone_crop_box(danger_zone, frame_shape, padding_ratio):
+    if danger_zone is None:
+        return None
+    frame_height, frame_width = frame_shape[:2]
+    min_x, min_y, max_x, max_y = danger_zone.bounds
+    box_width = max_x - min_x
+    box_height = max_y - min_y
+    if box_width <= 1 or box_height <= 1:
+        return None
+
+    padding = max(box_width, box_height) * max(0.0, float(padding_ratio))
+    x1 = max(0, int(min_x - padding))
+    y1 = max(0, int(min_y - padding))
+    x2 = min(frame_width, int(max_x + padding))
+    y2 = min(frame_height, int(max_y + padding))
+    if x2 - x1 <= 1 or y2 - y1 <= 1:
+        return None
+    return [x1, y1, x2, y2]
+
+
+def zone_crop_detections(
+    model,
+    names,
+    frame,
+    danger_zone,
+    crop_config,
+    model_config,
+    filter_config,
+    device,
+    active_mask_bboxes,
+    mask_overlap,
+):
+    debug = {"enabled": bool(crop_config.get("enabled", False)), "detections": []}
+    if not crop_config.get("enabled", False):
+        return [], [], [], debug
+
+    crop_box = clamp_zone_crop_box(danger_zone, frame.shape, crop_config.get("padding_ratio", 0.25))
+    debug["crop_box"] = crop_box
+    if crop_box is None:
+        return [], [], [], debug
+
+    x1, y1, x2, y2 = crop_box
+    crop = frame[y1:y2, x1:x2]
+    predict_args = {
+        "source": crop,
+        "iou": float(crop_config.get("iou", model_config.get("iou", 0.5))),
+        "conf": float(crop_config.get("confidence", 0.05)),
+        "imgsz": int(crop_config.get("imgsz", model_config.get("imgsz", 640))),
+        "verbose": False,
+    }
+    if device:
+        predict_args["device"] = device
+
+    crop_results = model(**predict_args)[0]
+    crop_classes = normalized_class_set(crop_config.get("classes", ["Person"]))
+    bboxes = []
+    labels = []
+    confidences = []
+
+    for result in crop_results.boxes:
+        crop_bbox = xyxy_list(result)
+        cls = int(result.cls[0])
+        conf = float(result.conf[0])
+        label = class_name(names, cls)
+        if normalize_class_label(label) not in crop_classes:
+            continue
+        if conf < configured_crop_min_confidence(label, crop_config, filter_config):
+            continue
+
+        bbox = [crop_bbox[0] + x1, crop_bbox[1] + y1, crop_bbox[2] + x1, crop_bbox[3] + y1]
+        if active_mask_bboxes and any(
+            calculate_overlap_ratio(bbox, mask_bbox) > float(mask_overlap.get("max_overlap_ratio", 0.8))
+            for mask_bbox in active_mask_bboxes
+        ):
+            continue
+
+        bboxes.append(bbox)
+        labels.append(label)
+        confidences.append(conf)
+        debug["detections"].append(
+            {
+                "label": label,
+                "confidence": conf,
+                "bbox": bbox,
+                "crop_bbox": crop_bbox,
+            }
+        )
+
+    return bboxes, labels, confidences, debug
 
 
 def passes_class_and_filter(bbox, class_label, conf, frame_shape, class_config, filter_config):
@@ -843,6 +969,7 @@ def camera_process_worker(
                 candidate_bboxes = []
                 candidate_labels = []
                 candidate_confidences = []
+                candidate_sources = []
 
                 for result in results.boxes:
                     bbox = xyxy_list(result)
@@ -862,23 +989,44 @@ def camera_process_worker(
                     candidate_bboxes.append(bbox)
                     candidate_labels.append(label)
                     candidate_confidences.append(conf)
+                    candidate_sources.append("full_frame")
+
+                crop_bboxes, crop_labels, crop_confidences, crop_debug = zone_crop_detections(
+                    model,
+                    names,
+                    frame,
+                    danger_zone,
+                    filter_config.get("zone_crop_detection", {}),
+                    model_config,
+                    filter_config,
+                    device,
+                    active_mask_bboxes,
+                    mask_overlap,
+                )
+                candidate_bboxes.extend(crop_bboxes)
+                candidate_labels.extend(crop_labels)
+                candidate_confidences.extend(crop_confidences)
+                candidate_sources.extend(["zone_crop"] * len(crop_bboxes))
 
                 duplicate_config = filter_config.get("duplicate_bbox", {})
-                candidate_bboxes, candidate_labels, candidate_confidences = deduplicate_overlapping_detections(
-                    candidate_bboxes,
-                    candidate_labels,
-                    candidate_confidences,
-                    duplicate_config,
+                candidate_bboxes, candidate_labels, candidate_confidences, candidate_sources = (
+                    deduplicate_overlapping_detections_with_metadata(
+                        candidate_bboxes,
+                        candidate_labels,
+                        candidate_confidences,
+                        candidate_sources,
+                        duplicate_config,
+                    )
                 )
 
                 danger_filter = filter_config.get("danger_zone_overlap", {})
                 intrusion_bboxes = []
+                intrusion_sources = []
                 if danger_zone is not None:
-                    intrusion_bboxes = [
-                        bbox
-                        for bbox in candidate_bboxes
-                        if bbox_matches_danger_zone(danger_zone, bbox, danger_filter)
-                    ]
+                    for bbox, source in zip(candidate_bboxes, candidate_sources):
+                        if bbox_matches_danger_zone(danger_zone, bbox, danger_filter):
+                            intrusion_bboxes.append(bbox)
+                            intrusion_sources.append(source)
 
                 is_intrusion = bool(intrusion_bboxes)
                 current_time = time.time()
@@ -900,7 +1048,12 @@ def camera_process_worker(
                         "candidate_labels": candidate_labels,
                         "candidate_confidences": candidate_confidences,
                         "candidate_bboxes": candidate_bboxes,
+                        "candidate_sources": candidate_sources,
                         "final_intrusion_bboxes": intrusion_bboxes,
+                        "final_intrusion_sources": intrusion_sources,
+                        "danger_zone_points": polygon_debug_points(danger_zone),
+                        "danger_zone_filter": danger_filter,
+                        "zone_crop_detection": crop_debug,
                     }
                     alert_thread = threading.Thread(
                         target=handle_alert_in_background,

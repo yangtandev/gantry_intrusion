@@ -130,6 +130,24 @@ log/gantry_intrusion.log
 
 The app cleans old `img_log/YYYYMMDD/` folders and rotated text logs hourly. Default retention is seven days.
 
+## Zone Crop Detection
+
+Optional zone crop detection keeps full-frame inference, then runs a second inference on an expanded danger-zone crop for small distant people:
+
+```json
+"zone_crop_detection": {
+  "enabled": true,
+  "classes": ["Person"],
+  "padding_ratio": 0.25,
+  "confidence": 0.05,
+  "min_confidence_by_class": {
+    "Person": 0.2
+  }
+}
+```
+
+Crop boxes are mapped back to the frame and merged before duplicate removal and zone contact checks.
+
 ## Zone Contact
 
 Default intrusion check uses the middle 80% of each detection box bottom line:

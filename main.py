@@ -482,6 +482,35 @@ def draw_detection_boxes(image, bboxes, labels, confidences, color=(0, 255, 0)):
     return output
 
 
+def draw_polygon_outline(image, polygon, color=(0, 255, 0)):
+    output = image.copy()
+    if polygon is None:
+        return output
+    geometries = polygon.geoms if hasattr(polygon, "geoms") else [polygon]
+    for geom in geometries:
+        if getattr(geom, "geom_type", None) != "Polygon":
+            continue
+        points = np.array(geom.exterior.coords, dtype=np.int32)
+        cv2.polylines(output, [points], True, color, 3)
+    return output
+
+
+def draw_crop_boxes(image, crop_boxes, color=(255, 0, 255)):
+    output = image.copy()
+    for index, box in enumerate(crop_boxes or [], 1):
+        x1, y1, x2, y2 = [int(v) for v in box]
+        cv2.rectangle(output, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(output, f"tile {index}", (x1 + 8, max(24, y1 + 24)), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
+    return output
+
+
+def draw_debug_overlay(image, danger_zone, crop_debug, bboxes, labels, confidences):
+    output = draw_transparent_polygon(image, danger_zone, color=(0, 255, 0), opacity=0.22)
+    output = draw_polygon_outline(output, danger_zone)
+    output = draw_crop_boxes(output, crop_debug.get("crop_boxes", []) if crop_debug else [])
+    return draw_detection_boxes(output, bboxes, labels, confidences, color=(0, 255, 255))
+
+
 def alert_api(image, api, location):
     if not api:
         return
@@ -503,6 +532,7 @@ def handle_alert_in_background(
     location_id,
     raw_frame=None,
     debug_info=None,
+    debug_overlay=None,
 ):
     log.info("[%s] Background alert thread started.", cam_id)
 
@@ -531,6 +561,9 @@ def handle_alert_in_background(
             basename = os.path.splitext(os.path.basename(file_path))[0]
             raw_image_path = os.path.join(debug_dir, f"{basename}_raw.png")
             cv2.imwrite(raw_image_path, raw_frame)
+            if debug_overlay is not None:
+                overlay_path = os.path.join(debug_dir, f"{basename}_debug_overlay.png")
+                cv2.imwrite(overlay_path, debug_overlay)
             json_path = os.path.join(debug_dir, f"{basename}.json")
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(debug_info, f, ensure_ascii=False, indent=4)
@@ -699,6 +732,54 @@ def clamp_zone_crop_box(danger_zone, frame_shape, padding_ratio):
     return [x1, y1, x2, y2]
 
 
+def split_crop_axis(start, end, max_size, overlap_ratio):
+    length = end - start
+    if length <= max_size:
+        return [(start, end)]
+
+    overlap_ratio = min(0.9, max(0.0, float(overlap_ratio)))
+    step = max(1, int(max_size * (1.0 - overlap_ratio)))
+    spans = []
+    pos = start
+    while pos + max_size < end:
+        spans.append((pos, pos + max_size))
+        pos += step
+
+    final = (end - max_size, end)
+    if not spans or spans[-1] != final:
+        spans.append(final)
+    return spans
+
+
+def zone_crop_boxes(danger_zone, frame_shape, crop_config):
+    crop_box = clamp_zone_crop_box(danger_zone, frame_shape, crop_config.get("padding_ratio", 0.25))
+    if crop_box is None:
+        return None, []
+    frame_height = frame_shape[0]
+    x1, y1, x2, y2 = crop_box
+    crop_height = y2 - y1
+    top_padding = int(crop_height * max(0.0, float(crop_config.get("top_padding_ratio", 0.0))))
+    if top_padding:
+        y1 = max(0, y1 - top_padding)
+        crop_box = [x1, y1, x2, min(frame_height, y2)]
+    if not crop_config.get("auto_tile", True):
+        return crop_box, [crop_box]
+
+    x1, y1, x2, y2 = crop_box
+    max_width = int(crop_config.get("max_crop_width", 640))
+    max_height = int(crop_config.get("max_crop_height", 640))
+    if max_width <= 1 or max_height <= 1:
+        return crop_box, [crop_box]
+
+    overlap_ratio = crop_config.get("tile_overlap_ratio", 0.25)
+    x_spans = split_crop_axis(x1, x2, max_width, overlap_ratio)
+    if crop_config.get("tile_vertical_anchor") == "bottom" and y2 - y1 > max_height:
+        y_spans = [(y2 - max_height, y2)]
+    else:
+        y_spans = split_crop_axis(y1, y2, max_height, overlap_ratio)
+    return crop_box, [[xs, ys, xe, ye] for ys, ye in y_spans for xs, xe in x_spans]
+
+
 def zone_crop_detections(
     model,
     names,
@@ -715,57 +796,60 @@ def zone_crop_detections(
     if not crop_config.get("enabled", False):
         return [], [], [], debug
 
-    crop_box = clamp_zone_crop_box(danger_zone, frame.shape, crop_config.get("padding_ratio", 0.25))
+    crop_box, crop_boxes = zone_crop_boxes(danger_zone, frame.shape, crop_config)
     debug["crop_box"] = crop_box
-    if crop_box is None:
+    debug["crop_boxes"] = crop_boxes
+    if not crop_boxes:
         return [], [], [], debug
 
-    x1, y1, x2, y2 = crop_box
-    crop = frame[y1:y2, x1:x2]
-    predict_args = {
-        "source": crop,
-        "iou": float(crop_config.get("iou", model_config.get("iou", 0.5))),
-        "conf": float(crop_config.get("confidence", 0.05)),
-        "imgsz": int(crop_config.get("imgsz", model_config.get("imgsz", 640))),
-        "verbose": False,
-    }
-    if device:
-        predict_args["device"] = device
-
-    crop_results = model(**predict_args)[0]
     crop_classes = normalized_class_set(crop_config.get("classes", ["Person"]))
     bboxes = []
     labels = []
     confidences = []
 
-    for result in crop_results.boxes:
-        crop_bbox = xyxy_list(result)
-        cls = int(result.cls[0])
-        conf = float(result.conf[0])
-        label = class_name(names, cls)
-        if normalize_class_label(label) not in crop_classes:
-            continue
-        if conf < configured_crop_min_confidence(label, crop_config, filter_config):
-            continue
+    for tile_box in crop_boxes:
+        x1, y1, x2, y2 = tile_box
+        crop = frame[y1:y2, x1:x2]
+        predict_args = {
+            "source": crop,
+            "iou": float(crop_config.get("iou", model_config.get("iou", 0.5))),
+            "conf": float(crop_config.get("confidence", 0.05)),
+            "imgsz": int(crop_config.get("imgsz", model_config.get("imgsz", 640))),
+            "verbose": False,
+        }
+        if device:
+            predict_args["device"] = device
 
-        bbox = [crop_bbox[0] + x1, crop_bbox[1] + y1, crop_bbox[2] + x1, crop_bbox[3] + y1]
-        if active_mask_bboxes and any(
-            calculate_overlap_ratio(bbox, mask_bbox) > float(mask_overlap.get("max_overlap_ratio", 0.8))
-            for mask_bbox in active_mask_bboxes
-        ):
-            continue
+        crop_results = model(**predict_args)[0]
+        for result in crop_results.boxes:
+            crop_bbox = xyxy_list(result)
+            cls = int(result.cls[0])
+            conf = float(result.conf[0])
+            label = class_name(names, cls)
+            if normalize_class_label(label) not in crop_classes:
+                continue
+            if conf < configured_crop_min_confidence(label, crop_config, filter_config):
+                continue
 
-        bboxes.append(bbox)
-        labels.append(label)
-        confidences.append(conf)
-        debug["detections"].append(
-            {
-                "label": label,
-                "confidence": conf,
-                "bbox": bbox,
-                "crop_bbox": crop_bbox,
-            }
-        )
+            bbox = [crop_bbox[0] + x1, crop_bbox[1] + y1, crop_bbox[2] + x1, crop_bbox[3] + y1]
+            if active_mask_bboxes and any(
+                calculate_overlap_ratio(bbox, mask_bbox) > float(mask_overlap.get("max_overlap_ratio", 0.8))
+                for mask_bbox in active_mask_bboxes
+            ):
+                continue
+
+            bboxes.append(bbox)
+            labels.append(label)
+            confidences.append(conf)
+            debug["detections"].append(
+                {
+                    "label": label,
+                    "confidence": conf,
+                    "bbox": bbox,
+                    "crop_bbox": crop_bbox,
+                    "crop_box": tile_box,
+                }
+            )
 
     return bboxes, labels, confidences, debug
 
@@ -1055,6 +1139,14 @@ def camera_process_worker(
                         "danger_zone_filter": danger_filter,
                         "zone_crop_detection": crop_debug,
                     }
+                    debug_overlay = draw_debug_overlay(
+                        frame,
+                        danger_zone,
+                        crop_debug,
+                        candidate_bboxes,
+                        candidate_labels,
+                        candidate_confidences,
+                    )
                     alert_thread = threading.Thread(
                         target=handle_alert_in_background,
                         args=(
@@ -1065,6 +1157,7 @@ def camera_process_worker(
                             location_id,
                             frame.copy(),
                             debug_info,
+                            debug_overlay,
                         ),
                         daemon=True,
                     )

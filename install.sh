@@ -207,7 +207,13 @@ collect_config() {
     "zone_crop_detection": {
       "enabled": false,
       "classes": ["Person"],
-      "padding_ratio": 0.25,
+      "padding_ratio": 0.0,
+      "top_padding_ratio": 0.5,
+      "auto_tile": true,
+      "max_crop_width": 480,
+      "max_crop_height": 270,
+      "tile_overlap_ratio": 0.25,
+      "tile_vertical_anchor": "bottom",
       "confidence": 0.05,
       "min_confidence_by_class": {
         "Person": 0.2

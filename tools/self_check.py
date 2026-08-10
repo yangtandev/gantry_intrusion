@@ -16,11 +16,13 @@ from main import (
     cleanup_date_dirs,
     deduplicate_overlapping_detections,
     deduplicate_overlapping_detections_with_metadata,
+    draw_debug_overlay,
     install_shutdown_handlers,
     openvino_model_ready,
     passes_class_and_filter,
     polygon_debug_points,
     read_danger_zones,
+    zone_crop_boxes,
 )
 
 
@@ -83,10 +85,49 @@ def main():
     assert not bbox_matches_danger_zone(zone, [10, 110, 50, 150], contact_filter)
     assert bbox_matches_danger_zone(zone, [10, 10, 50, 50], overlap_filter)
     assert not bbox_matches_danger_zone(zone, [90, 90, 190, 190], overlap_filter)
+    overlay = draw_debug_overlay(
+        __import__("numpy").zeros((120, 120, 3), dtype="uint8"),
+        zone,
+        {"crop_boxes": [[0, 0, 60, 60]]},
+        [[10, 10, 50, 50]],
+        ["Person"],
+        [0.9],
+    )
+    assert overlay.shape == (120, 120, 3)
     assert clamp_zone_crop_box(zone, (100, 100, 3), 0.25) == [0, 0, 100, 100]
     assert polygon_debug_points(zone) == [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0], [0.0, 0.0]]
     flat_zone = Polygon([(40, 80), (140, 80), (140, 90), (40, 90)])
     assert clamp_zone_crop_box(flat_zone, (200, 200, 3), 0.25) == [15, 55, 165, 115]
+    wide_zone = Polygon([(0, 0), (1280, 0), (1280, 200), (0, 200)])
+    base_crop, tiled_crops = zone_crop_boxes(
+        wide_zone,
+        (720, 1280, 3),
+        {"padding_ratio": 0, "max_crop_width": 640, "max_crop_height": 640, "tile_overlap_ratio": 0.25},
+    )
+    assert base_crop == [0, 0, 1280, 200]
+    assert tiled_crops == [[0, 0, 640, 200], [480, 0, 1120, 200], [640, 0, 1280, 200]]
+    _, single_crop = zone_crop_boxes(wide_zone, (720, 1280, 3), {"padding_ratio": 0, "auto_tile": False})
+    assert single_crop == [[0, 0, 1280, 200]]
+    padded_crop, padded_tiles = zone_crop_boxes(
+        Polygon([(0, 300), (1280, 300), (1280, 500), (0, 500)]),
+        (720, 1280, 3),
+        {"padding_ratio": 0, "top_padding_ratio": 0.5, "max_crop_width": 640, "max_crop_height": 640},
+    )
+    assert padded_crop == [0, 200, 1280, 500]
+    assert padded_tiles == [[0, 200, 640, 500], [480, 200, 1120, 500], [640, 200, 1280, 500]]
+    _, bottom_tiles = zone_crop_boxes(
+        Polygon([(0, 300), (1280, 300), (1280, 500), (0, 500)]),
+        (720, 1280, 3),
+        {
+            "padding_ratio": 0,
+            "top_padding_ratio": 0.5,
+            "max_crop_width": 480,
+            "max_crop_height": 270,
+            "tile_overlap_ratio": 0.25,
+            "tile_vertical_anchor": "bottom",
+        },
+    )
+    assert bottom_tiles == [[0, 230, 480, 500], [360, 230, 840, 500], [720, 230, 1200, 500], [800, 230, 1280, 500]]
 
     config_zone = read_danger_zones(
         {"zones": {"regions": {"cam": [[0, 0], [1, 0], [1, 1], [0, 1]]}}},

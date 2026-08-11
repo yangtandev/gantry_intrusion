@@ -125,30 +125,28 @@ class Camera:
             self.frame = None
             return
 
-        if self.reject_bad_frames and is_bad_frame(frame):
-            self.bad_frame_count += 1
-            self.ret = False
-            self.frame = None
-            if self.bad_frame_count == 1 or self.bad_frame_count % 300 == 0:
-                metrics = frame_quality_metrics(frame)
-                log.warning(
-                    "CAM %s [ACQ]: bad gray-noise frame dropped (grayish=%.3f low_sat=%.3f lap=%.1f edge=%.3f count=%s).",
-                    self.rtsp,
-                    metrics["grayish_ratio"],
-                    metrics["low_sat_ratio"],
-                    metrics["laplacian_var"],
-                    metrics["edge_density"],
-                    self.bad_frame_count,
-                )
-            return
-
         self.ret = True
         self.frame = frame
-        self.bad_frame_count = 0
 
     def get_data(self):
         # 回傳直接可供 OpenCV/YOLO 使用的 numpy array (BGR 格式)
         if self.ret and self.frame is not None:
+            if self.reject_bad_frames and is_bad_frame(self.frame):
+                self.bad_frame_count += 1
+                if self.bad_frame_count == 1 or self.bad_frame_count % 300 == 0:
+                    metrics = frame_quality_metrics(self.frame)
+                    log.warning(
+                        "CAM %s [ACQ]: bad gray-noise frame dropped (grayish=%.3f low_sat=%.3f lap=%.1f edge=%.3f count=%s).",
+                        self.rtsp,
+                        metrics["grayish_ratio"],
+                        metrics["low_sat_ratio"],
+                        metrics["laplacian_var"],
+                        metrics["edge_density"],
+                        self.bad_frame_count,
+                    )
+                return None
+
+            self.bad_frame_count = 0
             return self.frame.copy()
         return None
 

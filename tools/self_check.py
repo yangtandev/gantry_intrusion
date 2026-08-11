@@ -118,9 +118,13 @@ def main():
     camera.frame = None
     camera.bad_frame_count = 0
     camera._accept_frame(True, bad_gray)
-    assert camera.ret is False
-    assert camera.frame is None
+    assert camera.ret is True
+    assert camera.frame is bad_gray
+    assert camera.get_data() is None
     assert camera.bad_frame_count == 1
+    camera._accept_frame(True, normal_color)
+    assert camera.get_data().shape == normal_color.shape
+    assert camera.bad_frame_count == 0
 
     zone = Polygon([(0, 0), (100, 0), (100, 100), (0, 100)])
     contact_filter = {"mode": "bottom_line", "line_width_ratio": 0.8, "bottom_offset_ratio": 0.0}

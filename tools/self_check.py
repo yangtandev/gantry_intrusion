@@ -1,12 +1,17 @@
 from pathlib import Path
 import datetime
+import cv2
+import numpy as np
+from queue import Queue
 import signal
 import sys
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from camera import Camera, ffmpeg_line_indicates_bad_frame, is_bad_frame
 from shapely.geometry import Polygon
 
 from main import (
@@ -21,6 +26,7 @@ from main import (
     openvino_model_ready,
     passes_class_and_filter,
     polygon_debug_points,
+    put_latest_display_frame,
     read_danger_zones,
     zone_crop_boxes,
 )
@@ -77,6 +83,50 @@ def main():
     assert stop_event.stopped
     signal.signal(signal.SIGINT, previous_sigint)
     signal.signal(signal.SIGTERM, previous_sigterm)
+
+    display_queue = Queue(maxsize=1)
+    put_latest_display_frame(display_queue, ("cam", "old"))
+    put_latest_display_frame(display_queue, ("cam", "new"))
+    assert display_queue.get_nowait() == ("cam", "new")
+
+    bad_gray = np.full((180, 320, 3), 132, dtype="uint8")
+    bad_gray[40:70, 90:160] = 138
+    normal_color = np.zeros((180, 320, 3), dtype="uint8")
+    normal_color[:, :160] = (60, 150, 30)
+    normal_color[:, 160:] = (210, 80, 40)
+    cv2.rectangle(normal_color, (40, 40), (280, 140), (255, 255, 255), 3)
+    normal_gray = np.full((180, 320, 3), 120, dtype="uint8")
+    for x in range(20, 300, 28):
+        cv2.line(normal_gray, (x, 20), (x, 160), (230, 230, 230), 2)
+    for y in range(30, 170, 24):
+        cv2.line(normal_gray, (20, y), (300, y), (40, 40, 40), 2)
+    assert is_bad_frame(bad_gray)
+    assert not is_bad_frame(normal_color)
+    assert not is_bad_frame(normal_gray)
+
+    bad_sample = ROOT / "img_log/kt-sdp/20260811/debug/detected_camwb02_right_2026-08-11_16-50-52_raw.png"
+    normal_sample = ROOT / "img_log/kt-sdp/20260811/debug/detected_camwb02_right_2026-08-11_17-16-57_raw.png"
+    if bad_sample.exists() and normal_sample.exists():
+        assert is_bad_frame(cv2.imread(str(bad_sample)))
+        assert not is_bad_frame(cv2.imread(str(normal_sample)))
+
+    assert ffmpeg_line_indicates_bad_frame("[h264] concealing 23 DC, 23 AC, 23 MV errors in P frame")
+    assert ffmpeg_line_indicates_bad_frame("RTP: missed packets")
+    assert not ffmpeg_line_indicates_bad_frame("frame=123 fps=15")
+    assert Camera.__init__.__defaults__[3] is True
+
+    camera = Camera.__new__(Camera)
+    camera.rtsp = "rtsp://example"
+    camera.reject_bad_frames = True
+    camera.ret = False
+    camera.frame = None
+    camera.decode_error_until = time.time() + 1
+    camera.decode_dropped_count = 0
+    camera.bad_frame_count = 0
+    camera._accept_frame(True, normal_color)
+    assert camera.ret is False
+    assert camera.frame is None
+    assert camera.decode_dropped_count == 1
 
     zone = Polygon([(0, 0), (100, 0), (100, 100), (0, 100)])
     contact_filter = {"mode": "bottom_line", "line_width_ratio": 0.8, "bottom_offset_ratio": 0.0}

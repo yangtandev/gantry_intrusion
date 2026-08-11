@@ -6,15 +6,84 @@ import logging as log
 import os
 import subprocess
 
+
+FFMPEG_BAD_FRAME_PATTERNS = (
+    "corrupt",
+    "concealing",
+    "error while decoding",
+    "decode_slice_header error",
+    "invalid nal",
+    "non-existing pps",
+    "reference picture missing",
+    "missed packets",
+    "packet loss",
+)
+
+
+def ffmpeg_line_indicates_bad_frame(line):
+    lower = line.lower()
+    return any(pattern in lower for pattern in FFMPEG_BAD_FRAME_PATTERNS)
+
+
+def frame_quality_metrics(frame, max_side=320):
+    if frame is None or frame.ndim != 3 or frame.shape[2] != 3:
+        return {"grayish_ratio": 1.0, "low_sat_ratio": 1.0, "laplacian_var": 0.0, "edge_density": 0.0}
+
+    height, width = frame.shape[:2]
+    scale = min(1.0, max_side / max(height, width))
+    sample = frame
+    if scale < 1.0:
+        sample = cv2.resize(frame, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA)
+
+    hsv = cv2.cvtColor(sample, cv2.COLOR_BGR2HSV)
+    sat = hsv[:, :, 1]
+    val = hsv[:, :, 2]
+    gray_delta = sample.max(axis=2) - sample.min(axis=2)
+    grayish = (gray_delta <= 12) & (val >= 35) & (val <= 230)
+    gray = cv2.cvtColor(sample, cv2.COLOR_BGR2GRAY)
+    laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+    edge_density = (cv2.Canny(gray, 50, 150) > 0).mean()
+    return {
+        "grayish_ratio": float(grayish.mean()),
+        "low_sat_ratio": float((sat <= 28).mean()),
+        "laplacian_var": float(laplacian_var),
+        "edge_density": float(edge_density),
+    }
+
+
+def is_bad_frame(frame):
+    metrics = frame_quality_metrics(frame)
+    return (
+        metrics["grayish_ratio"] >= 0.90
+        and metrics["low_sat_ratio"] >= 0.90
+        and metrics["laplacian_var"] <= 300.0
+        and metrics["edge_density"] <= 0.04
+    )
+
+
 class Camera:
-    def __init__(self, rtsp, transport='tcp', width=1280, height=720):
+    def __init__(
+        self,
+        rtsp,
+        transport='tcp',
+        width=1280,
+        height=720,
+        reject_bad_frames=True,
+        decode_error_window_seconds=1.0,
+    ):
         self.rtsp = rtsp
         self.transport = transport
         self.width = width
         self.height = height
+        self.reject_bad_frames = reject_bad_frames
+        self.decode_error_window_seconds = decode_error_window_seconds
         self.stopped = False
         self.ret = False
         self.frame = None
+        self.bad_frame_count = 0
+        self.decode_error_count = 0
+        self.decode_dropped_count = 0
+        self.decode_error_until = 0
         self.process = None
         self.stream = None
 
@@ -28,7 +97,8 @@ class Camera:
         if not self.stream.isOpened():
             log.error(f"CAM {self.rtsp} [ACQ]: 無法開啟影像來源。")
         else:
-            self.ret, self.frame = self.stream.read()
+            ret, frame = self.stream.read()
+            self._accept_frame(ret, frame)
             self.thread = threading.Thread(target=self._update, daemon=True)
             self.thread.start()
 
@@ -36,7 +106,7 @@ class Camera:
         cmd = [
             'ffmpeg',
             '-hide_banner',
-            '-loglevel', 'error',
+            '-loglevel', 'warning',
             '-fflags', 'nobuffer+discardcorrupt',
             '-flags', 'low_delay',
             '-rtsp_transport', self.transport,
@@ -48,9 +118,34 @@ class Camera:
             '-f', 'rawvideo',
             'pipe:1',
         ]
-        self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**8)
+        self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10**8)
+        self.stderr_thread = threading.Thread(target=self._monitor_ffmpeg_stderr, daemon=True)
+        self.stderr_thread.start()
         self.thread = threading.Thread(target=self._update_ffmpeg, daemon=True)
         self.thread.start()
+
+    def _monitor_ffmpeg_stderr(self):
+        while not self.stopped and self.process and self.process.stderr:
+            line = self.process.stderr.readline()
+            if not line:
+                if self.process.poll() is not None:
+                    break
+                time.sleep(0.05)
+                continue
+
+            message = line.decode("utf-8", errors="replace").strip()
+            if not message or not ffmpeg_line_indicates_bad_frame(message):
+                continue
+
+            self.decode_error_count += 1
+            self.decode_error_until = time.time() + self.decode_error_window_seconds
+            if self.decode_error_count == 1 or self.decode_error_count % 30 == 0:
+                log.warning(
+                    "CAM %s [ACQ]: ffmpeg decode warning (%s, count=%s).",
+                    self.rtsp,
+                    message,
+                    self.decode_error_count,
+                )
 
     def _update(self):
         while not self.stopped:
@@ -58,7 +153,8 @@ class Camera:
                 self.stopped = True
                 break
             # 持續抓取最新畫面
-            self.ret, self.frame = self.stream.read()
+            ret, frame = self.stream.read()
+            self._accept_frame(ret, frame)
             time.sleep(0.01) # 略微休眠避免佔用過高 CPU
 
     def _update_ffmpeg(self):
@@ -68,8 +164,48 @@ class Camera:
             if len(raw) != frame_size:
                 self.ret = False
                 break
-            self.frame = np.frombuffer(raw, dtype=np.uint8).reshape((self.height, self.width, 3))
-            self.ret = True
+            frame = np.frombuffer(raw, dtype=np.uint8).reshape((self.height, self.width, 3))
+            self._accept_frame(True, frame)
+
+    def _accept_frame(self, ret, frame):
+        if not ret or frame is None:
+            self.ret = False
+            self.frame = None
+            return
+
+        if self.reject_bad_frames and time.time() < self.decode_error_until:
+            self.decode_dropped_count += 1
+            self.ret = False
+            self.frame = None
+            if self.decode_dropped_count == 1 or self.decode_dropped_count % 300 == 0:
+                log.warning(
+                    "CAM %s [ACQ]: frame dropped after recent ffmpeg decode warning (count=%s).",
+                    self.rtsp,
+                    self.decode_dropped_count,
+                )
+            return
+
+        if self.reject_bad_frames and is_bad_frame(frame):
+            self.bad_frame_count += 1
+            self.ret = False
+            self.frame = None
+            if self.bad_frame_count == 1 or self.bad_frame_count % 300 == 0:
+                metrics = frame_quality_metrics(frame)
+                log.warning(
+                    "CAM %s [ACQ]: bad gray-noise frame dropped (grayish=%.3f low_sat=%.3f lap=%.1f edge=%.3f count=%s).",
+                    self.rtsp,
+                    metrics["grayish_ratio"],
+                    metrics["low_sat_ratio"],
+                    metrics["laplacian_var"],
+                    metrics["edge_density"],
+                    self.bad_frame_count,
+                )
+            return
+
+        self.ret = True
+        self.frame = frame
+        self.bad_frame_count = 0
+        self.decode_dropped_count = 0
 
     def get_data(self):
         # 回傳直接可供 OpenCV/YOLO 使用的 numpy array (BGR 格式)
@@ -94,3 +230,5 @@ class Camera:
             self.stream.release()
         if hasattr(self, 'thread') and self.thread.is_alive():
             self.thread.join(timeout=2)
+        if hasattr(self, 'stderr_thread') and self.stderr_thread.is_alive():
+            self.stderr_thread.join(timeout=2)

@@ -945,11 +945,12 @@ def camera_process_worker(
     record_width = int(runtime_config.get("record_width", 1920))
     record_height = int(runtime_config.get("record_height", 1080))
     record_fps = float(runtime_config.get("record_fps", 15))
+    reject_bad_frames = bool(cam_config.get("reject_bad_frames", filter_config.get("bad_frame", {}).get("enabled", True)))
 
     log.info("[%s] Process started. Connecting RTSP...", cam_id)
     transports = ("tcp", "udp")
     transport_index = 0
-    cam = Camera(rtsp_link, transports[transport_index], width=frame_width, height=frame_height)
+    cam = Camera(rtsp_link, transports[transport_index], width=frame_width, height=frame_height, reject_bad_frames=reject_bad_frames)
 
     preview_deadline = time.time() + 5
     while not stop_event.is_set() and time.time() < preview_deadline:
@@ -1000,7 +1001,7 @@ def camera_process_worker(
                         log.warning("[%s] RTSP not open. Reconnecting via %s in 5 seconds.", cam_id, transports[transport_index])
                         cam.release()
                         time.sleep(5)
-                        cam = Camera(rtsp_link, transports[transport_index], width=frame_width, height=frame_height)
+                        cam = Camera(rtsp_link, transports[transport_index], width=frame_width, height=frame_height, reject_bad_frames=reject_bad_frames)
                         no_frame_counter = 0
                         first_no_frame_time = None
                         last_no_frame_log = 0
@@ -1021,7 +1022,7 @@ def camera_process_worker(
                         log.error("[%s] No frame for %s seconds. Reconnecting via %s.", cam_id, reconnect_after_seconds, transports[transport_index])
                         cam.release()
                         time.sleep(0.5)
-                        cam = Camera(rtsp_link, transports[transport_index], width=frame_width, height=frame_height)
+                        cam = Camera(rtsp_link, transports[transport_index], width=frame_width, height=frame_height, reject_bad_frames=reject_bad_frames)
                         no_frame_counter = 0
                         first_no_frame_time = None
                         last_no_frame_log = 0

@@ -770,25 +770,35 @@ def split_crop_axis(start, end, max_size, overlap_ratio):
     return spans
 
 
-def zone_crop_boxes(danger_zone, frame_shape, crop_config):
-    crop_box = clamp_zone_crop_box(danger_zone, frame_shape, crop_config.get("padding_ratio", 0.25))
+def apply_top_padding_to_crop(crop_box, frame_shape, top_padding_ratio):
     if crop_box is None:
-        return None, []
+        return None
     frame_height = frame_shape[0]
     x1, y1, x2, y2 = crop_box
     crop_height = y2 - y1
-    top_padding = int(crop_height * max(0.0, float(crop_config.get("top_padding_ratio", 0.0))))
+    top_padding = int(crop_height * max(0.0, float(top_padding_ratio)))
     if top_padding:
         y1 = max(0, y1 - top_padding)
-        crop_box = [x1, y1, x2, min(frame_height, y2)]
-    if not crop_config.get("auto_tile", True):
-        return crop_box, [crop_box]
+    return [x1, y1, x2, min(frame_height, y2)]
+
+
+def unique_crop_boxes(crop_boxes):
+    unique = []
+    for crop_box in crop_boxes:
+        if crop_box and crop_box not in unique:
+            unique.append(crop_box)
+    return unique
+
+
+def tiled_crop_boxes(crop_box, crop_config):
+    if crop_box is None:
+        return []
 
     x1, y1, x2, y2 = crop_box
     max_width = int(crop_config.get("max_crop_width", 640))
     max_height = int(crop_config.get("max_crop_height", 640))
     if max_width <= 1 or max_height <= 1:
-        return crop_box, [crop_box]
+        return [crop_box]
 
     overlap_ratio = crop_config.get("tile_overlap_ratio", 0.25)
     x_spans = split_crop_axis(x1, x2, max_width, overlap_ratio)
@@ -796,7 +806,58 @@ def zone_crop_boxes(danger_zone, frame_shape, crop_config):
         y_spans = [(y2 - max_height, y2)]
     else:
         y_spans = split_crop_axis(y1, y2, max_height, overlap_ratio)
-    return crop_box, [[xs, ys, xe, ye] for ys, ye in y_spans for xs, xe in x_spans]
+    return [[xs, ys, xe, ye] for ys, ye in y_spans for xs, xe in x_spans]
+
+
+def multi_scale_zone_crop_boxes(danger_zone, frame_shape, crop_config):
+    crop_boxes = []
+
+    context_config = dict(crop_config)
+    context_config.update(crop_config.get("context_crop", {}))
+    if context_config.get("enabled", True):
+        context_box = clamp_zone_crop_box(
+            danger_zone,
+            frame_shape,
+            context_config.get("padding_ratio", crop_config.get("padding_ratio", 0.25)),
+        )
+        context_box = apply_top_padding_to_crop(
+            context_box,
+            frame_shape,
+            context_config.get("top_padding_ratio", crop_config.get("top_padding_ratio", 0.0)),
+        )
+        crop_boxes.append(context_box)
+
+    zoom_config = dict(crop_config)
+    zoom_config.update(crop_config.get("zoom_crop", {}))
+    if zoom_config.get("enabled", True):
+        zoom_box = clamp_zone_crop_box(
+            danger_zone,
+            frame_shape,
+            zoom_config.get("padding_ratio", crop_config.get("padding_ratio", 0.25)),
+        )
+        zoom_box = apply_top_padding_to_crop(
+            zoom_box,
+            frame_shape,
+            zoom_config.get("top_padding_ratio", crop_config.get("top_padding_ratio", 0.0)),
+        )
+        crop_boxes.extend(tiled_crop_boxes(zoom_box, zoom_config))
+
+    crop_boxes = unique_crop_boxes(crop_boxes)
+    return (crop_boxes[0] if crop_boxes else None), crop_boxes
+
+
+def zone_crop_boxes(danger_zone, frame_shape, crop_config):
+    if crop_config.get("multi_scale", False):
+        return multi_scale_zone_crop_boxes(danger_zone, frame_shape, crop_config)
+
+    crop_box = clamp_zone_crop_box(danger_zone, frame_shape, crop_config.get("padding_ratio", 0.25))
+    if crop_box is None:
+        return None, []
+    crop_box = apply_top_padding_to_crop(crop_box, frame_shape, crop_config.get("top_padding_ratio", 0.0))
+    if not crop_config.get("auto_tile", True):
+        return crop_box, [crop_box]
+
+    return crop_box, tiled_crop_boxes(crop_box, crop_config)
 
 
 def zone_crop_detections(
@@ -975,6 +1036,7 @@ def camera_process_worker(
     reconnect_after_seconds = 60
     first_no_frame_time = None
     last_no_frame_log = 0
+    last_perf_log = 0
     video_writer = None
     current_record_hour = None
     record_dir = "./records"
@@ -987,6 +1049,8 @@ def camera_process_worker(
     mask_overlap = filter_config.get("mask_overlap", {})
     mask_classes = normalized_class_set(class_config.get("mask", []))
     mask_ttl_frames = int(mask_overlap.get("ttl_frames", 0))
+    crop_config = filter_config.get("zone_crop_detection", {})
+    crop_only_mode = crop_config.get("mode") == "crop_only"
 
     try:
         while not stop_event.is_set():
@@ -994,6 +1058,7 @@ def camera_process_worker(
                 now = datetime.datetime.now(ZoneInfo("Asia/Taipei"))
                 t_start = time.time()
                 frame = cam.get_data()
+                t_after_get = time.time()
 
                 if frame is None:
                     if not cam.is_opened():
@@ -1037,6 +1102,7 @@ def camera_process_worker(
                 last_no_frame_log = 0
 
                 frame = cv2.resize(frame, (frame_width, frame_height))
+                t_after_resize = time.time()
                 danger_zone, last_zone_reload_time = maybe_reload_danger_zone(
                     cam_config,
                     danger_zone,
@@ -1053,11 +1119,15 @@ def camera_process_worker(
                 }
                 if device:
                     predict_args["device"] = device
-                results = model(**predict_args)[0]
+                full_result_boxes = []
+                if not crop_only_mode:
+                    results = model(**predict_args)[0]
+                    full_result_boxes = list(results.boxes)
+                t_after_predict = time.time()
 
                 current_mask_bboxes = [
                     xyxy_list(result)
-                    for result in results.boxes
+                    for result in full_result_boxes
                     if normalize_class_label(class_name(names, int(result.cls[0]))) in mask_classes
                 ]
                 if current_mask_bboxes:
@@ -1074,7 +1144,7 @@ def camera_process_worker(
                 candidate_confidences = []
                 candidate_sources = []
 
-                for result in results.boxes:
+                for result in full_result_boxes:
                     bbox = xyxy_list(result)
                     cls = int(result.cls[0])
                     conf = float(result.conf[0])
@@ -1099,13 +1169,14 @@ def camera_process_worker(
                     names,
                     frame,
                     danger_zone,
-                    filter_config.get("zone_crop_detection", {}),
+                    crop_config,
                     model_config,
                     filter_config,
                     device,
                     active_mask_bboxes,
                     mask_overlap,
                 )
+                t_after_crop = time.time()
                 candidate_bboxes.extend(crop_bboxes)
                 candidate_labels.extend(crop_labels)
                 candidate_confidences.extend(crop_confidences)
@@ -1134,6 +1205,7 @@ def camera_process_worker(
                 is_intrusion = bool(intrusion_bboxes)
                 current_time = time.time()
                 is_in_cooldown = (current_time - last_alert_time) <= cooldown_seconds
+                t_after_postprocess = time.time()
 
                 if is_intrusion and not is_in_cooldown:
                     last_alert_time = current_time
@@ -1145,9 +1217,9 @@ def camera_process_worker(
                         "cam_id": cam_id,
                         "timestamp": now.isoformat(),
                         "model_classes": names,
-                        "bboxes": [xyxy_list(box_item) for box_item in results.boxes],
-                        "confidences": [float(box_item.conf[0]) for box_item in results.boxes],
-                        "classes": [int(box_item.cls[0]) for box_item in results.boxes],
+                        "bboxes": [xyxy_list(box_item) for box_item in full_result_boxes],
+                        "confidences": [float(box_item.conf[0]) for box_item in full_result_boxes],
+                        "classes": [int(box_item.cls[0]) for box_item in full_result_boxes],
                         "candidate_labels": candidate_labels,
                         "candidate_confidences": candidate_confidences,
                         "candidate_bboxes": candidate_bboxes,
@@ -1185,6 +1257,8 @@ def camera_process_worker(
                 display_frame = draw_detection_boxes(frame, candidate_bboxes, candidate_labels, candidate_confidences)
                 final_display_frame = draw_transparent_polygon(display_frame, danger_zone)
                 put_latest_display_frame(display_queue, (cam_id, final_display_frame))
+                t_after_display = time.time()
+                t_after_record = t_after_display
 
                 if enable_recording:
                     current_hour = now.hour
@@ -1203,6 +1277,26 @@ def camera_process_worker(
 
                     record_frame = cv2.resize(final_display_frame, (record_width, record_height))
                     video_writer.write(record_frame)
+                    t_after_record = time.time()
+
+                if t_after_record - last_perf_log >= 10:
+                    loop_total = t_after_record - t_start
+                    log.info(
+                        "[%s] perf get=%.3fs resize=%.3fs predict=%.3fs crop=%.3fs post=%.3fs display=%.3fs record=%.3fs total=%.3fs fps=%.2f candidates=%s intrusions=%s",
+                        cam_id,
+                        t_after_get - t_start,
+                        t_after_resize - t_after_get,
+                        t_after_predict - t_after_resize,
+                        t_after_crop - t_after_predict,
+                        t_after_postprocess - t_after_crop,
+                        t_after_display - t_after_postprocess,
+                        t_after_record - t_after_display,
+                        loop_total,
+                        1.0 / loop_total if loop_total > 0 else 0,
+                        len(candidate_bboxes),
+                        len(intrusion_bboxes),
+                    )
+                    last_perf_log = t_after_record
 
                 if frame_interval:
                     time.sleep(max(0, frame_interval - (time.time() - t_start)))

@@ -1,5 +1,11 @@
 # Release Notes
 
+## v1.6.5 - 2026-08-12
+
+- 新增 `zone_crop_detection.mode=crop_only`，可只針對管制區裁切畫面推論，避免全畫面推論拖慢。
+- 新增 `zone_crop_detection.multi_scale`，由管制區自動產生 context crop 與 zoom crops，適應不同攝影機角度。
+- 新增 worker 效能 log，定期輸出取幀、推論、crop、後處理與顯示耗時。
+
 ## v1.6.4 - 2026-08-12
 
 - 將灰色低結構雜訊檢查移到主流程取用最新幀時執行，避免 camera 讀取 thread 因逐幀分析造成串流積壓。

@@ -176,6 +176,31 @@ def main():
         },
     )
     assert bottom_tiles == [[0, 230, 480, 500], [360, 230, 840, 500], [720, 230, 1200, 500], [800, 230, 1280, 500]]
+    multi_base, multi_tiles = zone_crop_boxes(
+        Polygon([(0, 300), (1280, 300), (1280, 500), (0, 500)]),
+        (720, 1280, 3),
+        {
+            "multi_scale": True,
+            "context_crop": {"enabled": True, "padding_ratio": 0, "top_padding_ratio": 0.5},
+            "zoom_crop": {
+                "enabled": True,
+                "padding_ratio": 0,
+                "top_padding_ratio": 0.5,
+                "max_crop_width": 480,
+                "max_crop_height": 360,
+                "tile_overlap_ratio": 0.5,
+            },
+        },
+    )
+    assert multi_base == [0, 200, 1280, 500]
+    assert multi_tiles == [
+        [0, 200, 1280, 500],
+        [0, 200, 480, 500],
+        [240, 200, 720, 500],
+        [480, 200, 960, 500],
+        [720, 200, 1200, 500],
+        [800, 200, 1280, 500],
+    ]
 
     config_zone = read_danger_zones(
         {"zones": {"regions": {"cam": [[0, 0], [1, 0], [1, 1], [0, 1]]}}},

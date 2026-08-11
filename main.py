@@ -5,6 +5,7 @@ import json
 import logging as log
 import logging.handlers
 import os
+import queue
 import shutil
 import signal
 import sys
@@ -158,6 +159,24 @@ def save_image_with_limit(image, directory, folder_name, cam_id, limit=300):
     image_path = os.path.join(directory, f"{folder_name}_cam{cam_id}_{timestamp}.png")
     cv2.imwrite(image_path, image)
     return image_path
+
+
+def put_latest_display_frame(display_queue, item):
+    try:
+        display_queue.put_nowait(item)
+        return
+    except queue.Full:
+        pass
+
+    try:
+        display_queue.get_nowait()
+    except queue.Empty:
+        pass
+
+    try:
+        display_queue.put_nowait(item)
+    except queue.Full:
+        pass
 
 
 def image2base64(image):
@@ -938,8 +957,7 @@ def camera_process_worker(
         if frame is not None:
             preview_frame = cv2.resize(frame, (frame_width, frame_height))
             preview_frame = draw_transparent_polygon(preview_frame, danger_zone)
-            if not display_queue.full():
-                display_queue.put((cam_id, preview_frame))
+            put_latest_display_frame(display_queue, (cam_id, preview_frame))
             break
         time.sleep(0.1)
 
@@ -1165,8 +1183,7 @@ def camera_process_worker(
 
                 display_frame = draw_detection_boxes(frame, candidate_bboxes, candidate_labels, candidate_confidences)
                 final_display_frame = draw_transparent_polygon(display_frame, danger_zone)
-                if not display_queue.full():
-                    display_queue.put((cam_id, final_display_frame))
+                put_latest_display_frame(display_queue, (cam_id, final_display_frame))
 
                 if enable_recording:
                     current_hour = now.hour

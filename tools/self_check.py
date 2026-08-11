@@ -6,12 +6,11 @@ from queue import Queue
 import signal
 import sys
 import tempfile
-import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from camera import Camera, ffmpeg_line_indicates_bad_frame, is_bad_frame
+from camera import Camera, is_bad_frame
 from shapely.geometry import Polygon
 
 from main import (
@@ -110,9 +109,6 @@ def main():
         assert is_bad_frame(cv2.imread(str(bad_sample)))
         assert not is_bad_frame(cv2.imread(str(normal_sample)))
 
-    assert ffmpeg_line_indicates_bad_frame("[h264] concealing 23 DC, 23 AC, 23 MV errors in P frame")
-    assert ffmpeg_line_indicates_bad_frame("RTP: missed packets")
-    assert not ffmpeg_line_indicates_bad_frame("frame=123 fps=15")
     assert Camera.__init__.__defaults__[3] is True
 
     camera = Camera.__new__(Camera)
@@ -120,13 +116,11 @@ def main():
     camera.reject_bad_frames = True
     camera.ret = False
     camera.frame = None
-    camera.decode_error_until = time.time() + 1
-    camera.decode_dropped_count = 0
     camera.bad_frame_count = 0
-    camera._accept_frame(True, normal_color)
+    camera._accept_frame(True, bad_gray)
     assert camera.ret is False
     assert camera.frame is None
-    assert camera.decode_dropped_count == 1
+    assert camera.bad_frame_count == 1
 
     zone = Polygon([(0, 0), (100, 0), (100, 100), (0, 100)])
     contact_filter = {"mode": "bottom_line", "line_width_ratio": 0.8, "bottom_offset_ratio": 0.0}

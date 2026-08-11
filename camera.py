@@ -7,24 +7,6 @@ import os
 import subprocess
 
 
-FFMPEG_BAD_FRAME_PATTERNS = (
-    "corrupt",
-    "concealing",
-    "error while decoding",
-    "decode_slice_header error",
-    "invalid nal",
-    "non-existing pps",
-    "reference picture missing",
-    "missed packets",
-    "packet loss",
-)
-
-
-def ffmpeg_line_indicates_bad_frame(line):
-    lower = line.lower()
-    return any(pattern in lower for pattern in FFMPEG_BAD_FRAME_PATTERNS)
-
-
 def frame_quality_metrics(frame, max_side=320):
     if frame is None or frame.ndim != 3 or frame.shape[2] != 3:
         return {"grayish_ratio": 1.0, "low_sat_ratio": 1.0, "laplacian_var": 0.0, "edge_density": 0.0}
@@ -69,21 +51,16 @@ class Camera:
         width=1280,
         height=720,
         reject_bad_frames=True,
-        decode_error_window_seconds=1.0,
     ):
         self.rtsp = rtsp
         self.transport = transport
         self.width = width
         self.height = height
         self.reject_bad_frames = reject_bad_frames
-        self.decode_error_window_seconds = decode_error_window_seconds
         self.stopped = False
         self.ret = False
         self.frame = None
         self.bad_frame_count = 0
-        self.decode_error_count = 0
-        self.decode_dropped_count = 0
-        self.decode_error_until = 0
         self.process = None
         self.stream = None
 
@@ -106,7 +83,7 @@ class Camera:
         cmd = [
             'ffmpeg',
             '-hide_banner',
-            '-loglevel', 'warning',
+            '-loglevel', 'error',
             '-fflags', 'nobuffer+discardcorrupt',
             '-flags', 'low_delay',
             '-rtsp_transport', self.transport,
@@ -118,34 +95,9 @@ class Camera:
             '-f', 'rawvideo',
             'pipe:1',
         ]
-        self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10**8)
-        self.stderr_thread = threading.Thread(target=self._monitor_ffmpeg_stderr, daemon=True)
-        self.stderr_thread.start()
+        self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**8)
         self.thread = threading.Thread(target=self._update_ffmpeg, daemon=True)
         self.thread.start()
-
-    def _monitor_ffmpeg_stderr(self):
-        while not self.stopped and self.process and self.process.stderr:
-            line = self.process.stderr.readline()
-            if not line:
-                if self.process.poll() is not None:
-                    break
-                time.sleep(0.05)
-                continue
-
-            message = line.decode("utf-8", errors="replace").strip()
-            if not message or not ffmpeg_line_indicates_bad_frame(message):
-                continue
-
-            self.decode_error_count += 1
-            self.decode_error_until = time.time() + self.decode_error_window_seconds
-            if self.decode_error_count == 1 or self.decode_error_count % 30 == 0:
-                log.warning(
-                    "CAM %s [ACQ]: ffmpeg decode warning (%s, count=%s).",
-                    self.rtsp,
-                    message,
-                    self.decode_error_count,
-                )
 
     def _update(self):
         while not self.stopped:
@@ -173,18 +125,6 @@ class Camera:
             self.frame = None
             return
 
-        if self.reject_bad_frames and time.time() < self.decode_error_until:
-            self.decode_dropped_count += 1
-            self.ret = False
-            self.frame = None
-            if self.decode_dropped_count == 1 or self.decode_dropped_count % 300 == 0:
-                log.warning(
-                    "CAM %s [ACQ]: frame dropped after recent ffmpeg decode warning (count=%s).",
-                    self.rtsp,
-                    self.decode_dropped_count,
-                )
-            return
-
         if self.reject_bad_frames and is_bad_frame(frame):
             self.bad_frame_count += 1
             self.ret = False
@@ -205,7 +145,6 @@ class Camera:
         self.ret = True
         self.frame = frame
         self.bad_frame_count = 0
-        self.decode_dropped_count = 0
 
     def get_data(self):
         # 回傳直接可供 OpenCV/YOLO 使用的 numpy array (BGR 格式)
@@ -230,5 +169,3 @@ class Camera:
             self.stream.release()
         if hasattr(self, 'thread') and self.thread.is_alive():
             self.thread.join(timeout=2)
-        if hasattr(self, 'stderr_thread') and self.stderr_thread.is_alive():
-            self.stderr_thread.join(timeout=2)

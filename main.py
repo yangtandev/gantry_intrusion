@@ -1001,6 +1001,9 @@ def camera_process_worker(
 
     frame_width = int(runtime_config.get("frame_width", 1280))
     frame_height = int(runtime_config.get("frame_height", 720))
+    use_source_resolution = bool(runtime_config.get("use_source_resolution", False))
+    camera_width = 0 if use_source_resolution else frame_width
+    camera_height = 0 if use_source_resolution else frame_height
     inference_fps = float(runtime_config.get("inference_fps", 4))
     inference_threads = int(runtime_config.get("inference_threads", 2))
     record_width = int(runtime_config.get("record_width", 1920))
@@ -1011,13 +1014,25 @@ def camera_process_worker(
     log.info("[%s] Process started. Connecting RTSP...", cam_id)
     transports = ("tcp", "udp")
     transport_index = 0
-    cam = Camera(rtsp_link, transports[transport_index], width=frame_width, height=frame_height, reject_bad_frames=reject_bad_frames)
+    cam = Camera(rtsp_link, transports[transport_index], width=camera_width, height=camera_height, reject_bad_frames=reject_bad_frames)
 
     preview_deadline = time.time() + 5
     while not stop_event.is_set() and time.time() < preview_deadline:
         frame = cam.get_data()
         if frame is not None:
-            preview_frame = cv2.resize(frame, (frame_width, frame_height))
+            preview_frame = frame.copy() if use_source_resolution else cv2.resize(frame, (frame_width, frame_height))
+            if use_source_resolution:
+                preview_height, preview_width = preview_frame.shape[:2]
+                preview_zone = read_camera_danger_zone(
+                    load_config(),
+                    cam_config,
+                    preview_width,
+                    preview_height,
+                    required=False,
+                    log_missing=False,
+                )
+                if preview_zone is not None:
+                    danger_zone = preview_zone
             preview_frame = draw_transparent_polygon(preview_frame, danger_zone)
             put_latest_display_frame(display_queue, (cam_id, preview_frame))
             break
@@ -1027,7 +1042,7 @@ def camera_process_worker(
     model, names, is_openvino = load_model(model_config, inference_threads)
     warn_unknown_classes(names, class_config)
     device = prediction_device(model_config, is_openvino)
-    last_zone_reload_time = time.time()
+    last_zone_reload_time = 0 if use_source_resolution else time.time()
 
     last_alert_time = 0
     frame_interval = 1.0 / inference_fps if inference_fps > 0 else 0
@@ -1066,7 +1081,7 @@ def camera_process_worker(
                         log.warning("[%s] RTSP not open. Reconnecting via %s in 5 seconds.", cam_id, transports[transport_index])
                         cam.release()
                         time.sleep(5)
-                        cam = Camera(rtsp_link, transports[transport_index], width=frame_width, height=frame_height, reject_bad_frames=reject_bad_frames)
+                        cam = Camera(rtsp_link, transports[transport_index], width=camera_width, height=camera_height, reject_bad_frames=reject_bad_frames)
                         no_frame_counter = 0
                         first_no_frame_time = None
                         last_no_frame_log = 0
@@ -1087,7 +1102,7 @@ def camera_process_worker(
                         log.error("[%s] No frame for %s seconds. Reconnecting via %s.", cam_id, reconnect_after_seconds, transports[transport_index])
                         cam.release()
                         time.sleep(0.5)
-                        cam = Camera(rtsp_link, transports[transport_index], width=frame_width, height=frame_height, reject_bad_frames=reject_bad_frames)
+                        cam = Camera(rtsp_link, transports[transport_index], width=camera_width, height=camera_height, reject_bad_frames=reject_bad_frames)
                         no_frame_counter = 0
                         first_no_frame_time = None
                         last_no_frame_log = 0
@@ -1101,7 +1116,10 @@ def camera_process_worker(
                 first_no_frame_time = None
                 last_no_frame_log = 0
 
-                frame = cv2.resize(frame, (frame_width, frame_height))
+                if use_source_resolution:
+                    frame_height, frame_width = frame.shape[:2]
+                else:
+                    frame = cv2.resize(frame, (frame_width, frame_height))
                 t_after_resize = time.time()
                 danger_zone, last_zone_reload_time = maybe_reload_danger_zone(
                     cam_config,

@@ -54,8 +54,9 @@ class Camera:
     ):
         self.rtsp = rtsp
         self.transport = transport
-        self.width = width
-        self.height = height
+        self.width = int(width or 0)
+        self.height = int(height or 0)
+        self.scale_output = self.width > 0 and self.height > 0
         self.reject_bad_frames = reject_bad_frames
         self.stopped = False
         self.ret = False
@@ -69,6 +70,26 @@ class Camera:
         else:
             self._open_opencv()
 
+    def _probe_stream_size(self):
+        cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-rtsp_transport', self.transport,
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream=width,height',
+            '-of', 'csv=p=0:s=x',
+            self.rtsp,
+        ]
+        try:
+            output = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, timeout=8).decode().strip()
+            size = output.splitlines()[0].strip()
+            width, height = [int(value) for value in size.split('x', 1)]
+            if width > 0 and height > 0:
+                return width, height
+        except Exception as e:
+            log.warning("CAM %s [ACQ]: failed to probe source size: %s", self.rtsp, e)
+        return None
+
     def _open_opencv(self):
         self.stream = cv2.VideoCapture(self.rtsp)
         if not self.stream.isOpened():
@@ -80,6 +101,16 @@ class Camera:
             self.thread.start()
 
     def _open_ffmpeg(self):
+        if not self.scale_output:
+            source_size = self._probe_stream_size()
+            if source_size:
+                self.width, self.height = source_size
+                log.info("CAM %s [ACQ]: using source resolution %sx%s.", self.rtsp, self.width, self.height)
+            else:
+                self.width, self.height = 1280, 720
+                self.scale_output = True
+                log.warning("CAM %s [ACQ]: fallback to scaled 1280x720.", self.rtsp)
+
         cmd = [
             'ffmpeg',
             '-hide_banner',
@@ -90,7 +121,7 @@ class Camera:
             *(['-rtsp_flags', 'prefer_tcp'] if self.transport == 'tcp' else []),
             '-i', self.rtsp,
             '-an',
-            '-vf', f'scale={self.width}:{self.height}',
+            *(['-vf', f'scale={self.width}:{self.height}'] if self.scale_output else []),
             '-pix_fmt', 'bgr24',
             '-f', 'rawvideo',
             'pipe:1',

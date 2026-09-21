@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from camera import Camera
+from camera import Camera, is_bad_frame
 
 COLOR = (0, 0, 255)
 
@@ -51,7 +51,9 @@ def grab_frame(camera, runtime, timeout):
         while time.time() < deadline:
             frame = capture.get_data()
             if frame is not None:
-                return cv2.resize(frame, (width, height))
+                frame = cv2.resize(frame, (width, height))
+                if not is_bad_frame(frame):
+                    return frame
             time.sleep(0.1)
     finally:
         capture.release()

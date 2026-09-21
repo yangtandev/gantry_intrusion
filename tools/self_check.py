@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from camera import Camera, is_bad_frame
+from tools import calibrate_zone
 from shapely.geometry import Polygon
 
 from main import (
@@ -102,6 +103,28 @@ def main():
     assert is_bad_frame(bad_gray)
     assert not is_bad_frame(normal_color)
     assert not is_bad_frame(normal_gray)
+
+    class FakeCalibrationCamera:
+        def __init__(self, *_args, **_kwargs):
+            self.frames = iter((bad_gray, normal_color))
+
+        def get_data(self):
+            return next(self.frames, None)
+
+        def release(self):
+            pass
+
+    original_camera = calibrate_zone.Camera
+    calibrate_zone.Camera = FakeCalibrationCamera
+    try:
+        calibration_frame = calibrate_zone.grab_frame(
+            {"id": "test", "rtsp_url": "fake"},
+            {"frame_width": 320, "frame_height": 180},
+            1,
+        )
+        assert np.array_equal(calibration_frame, normal_color)
+    finally:
+        calibrate_zone.Camera = original_camera
 
     bad_sample = ROOT / "img_log/kt-sdp/20260811/debug/detected_camwb02_right_2026-08-11_16-50-52_raw.png"
     normal_sample = ROOT / "img_log/kt-sdp/20260811/debug/detected_camwb02_right_2026-08-11_17-16-57_raw.png"

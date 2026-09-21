@@ -1,5 +1,10 @@
 # Release Notes
 
+## v1.7.2 - 2026-09-21
+
+- 安裝腳本會顯示系統套件、uv、Python、虛擬環境、Python 依賴與 systemd 的執行進度和錯誤。
+- 修正 Ubuntu 24.04 的 OpenGL 執行期套件名稱，並讓 Git LFS 下載失敗明確警告。
+
 ## v1.7.0 - 2026-08-12
 
 - 新增 `runtime.use_source_resolution`，RTSP 可使用攝影機原始解析度取幀，不再強制縮成 1280x720。

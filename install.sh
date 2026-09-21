@@ -247,22 +247,21 @@ EOF
 install_system_deps() {
     log_step 2 "安裝系統依賴套件 (git, git-lfs, OpenCV 執行期函式庫)..."
 
-    apt-get update -qq > /dev/null 2>&1
-    apt-get install -y -qq \
+    apt-get update
+    apt-get install -y \
         git \
         git-lfs \
         ffmpeg \
         curl \
         build-essential \
-        libgl1-mesa-glx \
+        libgl1 \
         libglib2.0-0 \
         libsm6 \
         libxext6 \
         libxrender1 \
-        libfontconfig1 \
-        > /dev/null 2>&1
+        libfontconfig1
 
-    sudo -u "${ACTUAL_USER}" git lfs install --skip-repo > /dev/null 2>&1
+    sudo -u "${ACTUAL_USER}" git lfs install --skip-repo
 
     log_success "系統依賴安裝完成"
 }
@@ -275,16 +274,16 @@ install_uv() {
 
     if sudo -u "${ACTUAL_USER}" bash -c "export PATH='${ACTUAL_HOME}/.local/bin:\${PATH}' && command -v uv" > /dev/null 2>&1; then
         local uv_ver
-        uv_ver=$(sudo -u "${ACTUAL_USER}" bash -c "export PATH='${ACTUAL_HOME}/.local/bin:\${PATH}' && uv --version" 2>/dev/null)
+        uv_ver=$(sudo -u "${ACTUAL_USER}" bash -c "export PATH='${ACTUAL_HOME}/.local/bin:\${PATH}' && uv --version")
         log_success "uv 已安裝: ${uv_ver}"
         return
     fi
 
-    sudo -u "${ACTUAL_USER}" bash -c 'curl -LsSf https://astral.sh/uv/install.sh | sh' > /dev/null 2>&1
+    sudo -u "${ACTUAL_USER}" bash -o pipefail -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
 
     if [[ -f "${UV_BIN}" ]]; then
         local uv_ver
-        uv_ver=$("${UV_BIN}" --version 2>/dev/null)
+        uv_ver=$("${UV_BIN}" --version)
         log_success "uv 安裝完成: ${uv_ver}"
     else
         log_error "uv 安裝失敗，請手動安裝: https://docs.astral.sh/uv/"
@@ -298,11 +297,11 @@ setup_python_env() {
     log_step 4 "透過 uv 安裝 Python ${PYTHON_VERSION} 並建立虛擬環境..."
 
     log_info "下載 Python ${PYTHON_VERSION} (standalone build)..."
-    sudo -u "${ACTUAL_USER}" bash -c "'${UV_BIN}' python install '${PYTHON_VERSION}'" > /dev/null 2>&1
+    sudo -u "${ACTUAL_USER}" bash -c "'${UV_BIN}' python install '${PYTHON_VERSION}'"
     log_success "Python ${PYTHON_VERSION} 已就緒"
 
     log_info "建立虛擬環境: ${VENV_DIR}/"
-    sudo -u "${ACTUAL_USER}" bash -c "cd '${PROJECT_DIR}' && '${UV_BIN}' venv --python '${PYTHON_VERSION}' '${VENV_DIR}'" > /dev/null 2>&1
+    sudo -u "${ACTUAL_USER}" bash -c "cd '${PROJECT_DIR}' && '${UV_BIN}' venv --python '${PYTHON_VERSION}' '${VENV_DIR}'"
     log_success "虛擬環境已建立"
 }
 
@@ -313,7 +312,7 @@ install_python_deps() {
     log_step 5 "安裝 Python 依賴套件 (ultralytics, OpenVINO, OpenCV...)..."
     log_info "這可能需要幾分鐘，請耐心等候..."
 
-    sudo -u "${ACTUAL_USER}" bash -c "cd '${PROJECT_DIR}' && '${UV_BIN}' pip install --python '${VENV_DIR}/bin/python' -r requirements.txt" 2>&1 | tail -1
+    sudo -u "${ACTUAL_USER}" bash -c "cd '${PROJECT_DIR}' && '${UV_BIN}' pip install --python '${VENV_DIR}/bin/python' -r requirements.txt"
 
     log_success "所有 Python 依賴安裝完成"
 }
@@ -325,7 +324,9 @@ pull_lfs_models() {
     log_step 6 "檢查模型檔案..."
 
     if [[ -d "${PROJECT_DIR}/.git" ]]; then
-        sudo -u "${ACTUAL_USER}" bash -c "cd '${PROJECT_DIR}' && git lfs pull" > /dev/null 2>&1 || true
+        if ! sudo -u "${ACTUAL_USER}" bash -c "cd '${PROJECT_DIR}' && git lfs pull"; then
+            log_warn "Git LFS 模型下載失敗；稍後可在專案目錄執行 git lfs pull 重試"
+        fi
     fi
 
     if [[ -d "${PROJECT_DIR}/models/hf/yolo26n_openvino_model" ]]; then
@@ -387,15 +388,18 @@ EOF
     chmod 644 "${service_file}"
 
     if systemctl list-unit-files --type=service "${SERVICE_NAME}.service" 2>/dev/null | grep -q "^${SERVICE_NAME}\.service"; then
-        systemctl disable --now "${SERVICE_NAME}.service" > /dev/null 2>&1 || true
-        log_info "已停用舊的 system service，避免重複啟動"
+        if systemctl disable --now "${SERVICE_NAME}.service"; then
+            log_info "已停用舊的 system service，避免重複啟動"
+        else
+            log_warn "無法停用舊的 system service；請確認沒有重複運行"
+        fi
     fi
 
-    loginctl enable-linger "${ACTUAL_USER}" > /dev/null 2>&1
-    systemctl start "user@${user_uid}.service" > /dev/null 2>&1 || true
+    loginctl enable-linger "${ACTUAL_USER}"
+    systemctl start "user@${user_uid}.service"
 
     user_systemctl daemon-reload
-    user_systemctl enable "${SERVICE_NAME}.service" > /dev/null 2>&1
+    user_systemctl enable "${SERVICE_NAME}.service"
     log_success "user 服務已建立並設為開機自啟"
 
     log_info "啟動服務..."

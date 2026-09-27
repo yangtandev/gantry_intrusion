@@ -52,6 +52,19 @@ Target hardware: ASUS/Intel NUC14RVH-B, no discrete GPU.
 
 Default runtime config reads 1920x1080/15 FPS camera streams, resizes frames to 1280x720, and runs inference at 4 FPS per camera with `imgsz=640`. Tune `runtime.inference_fps`, `runtime.inference_threads`, and `model.imgsz` in `config.json`.
 
+`runtime.rtsp_frame_timeout_seconds` defaults to 10 (must be finite and positive).
+The first decoded frame has a separate startup deadline, controlled by
+`runtime.rtsp_startup_timeout_seconds` (default 60, finite and positive). After
+receiving the first frame, if no new decoded frame arrives within the frame timeout, cached frames are rejected and
+the worker reconnects after its existing five-second delay. A disconnected camera
+shows a stream-unavailable message. Perf logs include `frame_seq` (received frames
+since connecting) and `frame_age` (seconds since the last received frame); `fps`
+still measures processing speed, not incoming camera FPS. This detects stopped
+delivery, not a camera that keeps sending identical images.
+FFmpeg stderr is discarded to suppress noisy decoder errors; application-level
+stream timeout and reconnect warnings remain enabled. Timeouts are enforced in Python
+to avoid FFmpeg-version differences in the meaning of RTSP timeout options.
+
 ## Configuration
 
 `config.json` contains site-specific RTSP passwords and zone coordinates, so it is ignored by git. Create it with `install.sh`, then edit the local file when needed:

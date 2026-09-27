@@ -5,6 +5,7 @@ import time
 import logging as log
 import os
 import subprocess
+import math
 
 
 def frame_quality_metrics(frame, max_side=320):
@@ -51,6 +52,8 @@ class Camera:
         width=1280,
         height=720,
         reject_bad_frames=True,
+        frame_timeout=10.0,
+        startup_timeout=60.0,
     ):
         self.rtsp = rtsp
         self.transport = transport
@@ -58,6 +61,16 @@ class Camera:
         self.height = int(height or 0)
         self.scale_output = self.width > 0 and self.height > 0
         self.reject_bad_frames = reject_bad_frames
+        self.frame_timeout = float(frame_timeout)
+        self.startup_timeout = float(startup_timeout)
+        if not math.isfinite(self.frame_timeout) or self.frame_timeout <= 0:
+            raise ValueError("frame_timeout must be a finite positive number")
+        if not math.isfinite(self.startup_timeout) or self.startup_timeout <= 0:
+            raise ValueError("startup_timeout must be a finite positive number")
+        self.frame_lock = threading.Lock()
+        self.last_frame_time = time.monotonic()
+        self.frame_seq = 0
+        self.stale_logged = False
         self.stopped = False
         self.ret = False
         self.frame = None
@@ -126,46 +139,70 @@ class Camera:
             '-f', 'rawvideo',
             'pipe:1',
         ]
+        # Start the first-frame deadline after probing the source resolution.
+        self.last_frame_time = time.monotonic()
         self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**8)
         self.thread = threading.Thread(target=self._update_ffmpeg, daemon=True)
         self.thread.start()
 
     def _update(self):
-        while not self.stopped:
-            if not self.stream.isOpened():
-                self.stopped = True
-                break
-            # 持續抓取最新畫面
-            ret, frame = self.stream.read()
-            self._accept_frame(ret, frame)
-            time.sleep(0.01) # 略微休眠避免佔用過高 CPU
+        try:
+            while not self.stopped and self.stream.isOpened():
+                ret, frame = self.stream.read()
+                self._accept_frame(ret, frame)
+                time.sleep(0.01)
+        finally:
+            self._accept_frame(False, None)
 
     def _update_ffmpeg(self):
         frame_size = self.width * self.height * 3
-        while not self.stopped and self.process and self.process.poll() is None:
-            raw = self.process.stdout.read(frame_size)
-            if len(raw) != frame_size:
-                self.ret = False
-                break
-            frame = np.frombuffer(raw, dtype=np.uint8).reshape((self.height, self.width, 3))
-            self._accept_frame(True, frame)
+        try:
+            while not self.stopped and self.process and self.process.poll() is None:
+                raw = self.process.stdout.read(frame_size)
+                if len(raw) != frame_size:
+                    break
+                frame = np.frombuffer(raw, dtype=np.uint8).reshape((self.height, self.width, 3))
+                self._accept_frame(True, frame)
+        finally:
+            self._accept_frame(False, None)
 
     def _accept_frame(self, ret, frame):
-        if not ret or frame is None:
-            self.ret = False
-            self.frame = None
-            return
+        with self.frame_lock:
+            self.ret = bool(ret and frame is not None)
+            self.frame = frame if self.ret else None
+            if self.ret:
+                self.last_frame_time = time.monotonic()
+                self.frame_seq += 1
+                self.stale_logged = False
 
-        self.ret = True
-        self.frame = frame
+    def frame_age(self):
+        with self.frame_lock:
+            return time.monotonic() - self.last_frame_time
+
+    def frame_wait_remaining(self):
+        with self.frame_lock:
+            timeout = self.startup_timeout if self.frame_seq == 0 else self.frame_timeout
+            return max(0.0, timeout - (time.monotonic() - self.last_frame_time))
 
     def get_data(self):
         # 回傳直接可供 OpenCV/YOLO 使用的 numpy array (BGR 格式)
-        if self.ret and self.frame is not None:
-            if self.reject_bad_frames and is_bad_frame(self.frame):
+        with self.frame_lock:
+            frame = self.frame if self.ret else None
+            age = time.monotonic() - self.last_frame_time
+            timeout = self.startup_timeout if self.frame_seq == 0 else self.frame_timeout
+            stale = age >= timeout
+            warn_stale = stale and not self.stale_logged
+            if stale:
+                self.stale_logged = True
+        if warn_stale:
+            log.warning("[ACQ] No new frame for %.1fs (frame_seq=%s); reconnect required.", age, self.frame_seq)
+        if stale or not self.is_opened():
+            return None
+        if frame is not None:
+            if self.reject_bad_frames and is_bad_frame(frame):
                 self.bad_frame_count += 1
                 if self.bad_frame_count == 1 or self.bad_frame_count % 300 == 0:
-                    metrics = frame_quality_metrics(self.frame)
+                    metrics = frame_quality_metrics(frame)
                     log.warning(
                         "CAM %s [ACQ]: bad gray-noise frame dropped (grayish=%.3f low_sat=%.3f lap=%.1f edge=%.3f count=%s).",
                         self.rtsp,
@@ -178,10 +215,14 @@ class Camera:
                 return None
 
             self.bad_frame_count = 0
-            return self.frame.copy()
+            return frame.copy()
         return None
 
     def is_opened(self):
+        if self.stopped or self.frame_wait_remaining() <= 0:
+            return False
+        if hasattr(self, 'thread') and not self.thread.is_alive():
+            return False
         if self.process is not None:
             return self.process.poll() is None
         return self.stream is not None and self.stream.isOpened()
@@ -194,7 +235,11 @@ class Camera:
                 self.process.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 self.process.kill()
+                self.process.wait(timeout=2)
         if self.stream is not None and self.stream.isOpened():
             self.stream.release()
         if hasattr(self, 'thread') and self.thread.is_alive():
             self.thread.join(timeout=2)
+        if self.process is not None and self.process.stdout is not None and (not hasattr(self, 'thread') or not self.thread.is_alive()):
+            self.process.stdout.close()
+        self._accept_frame(False, None)

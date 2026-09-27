@@ -1010,12 +1010,16 @@ def camera_process_worker(
     record_height = int(runtime_config.get("record_height", 1080))
     record_fps = float(runtime_config.get("record_fps", 15))
     reject_bad_frames = bool(cam_config.get("reject_bad_frames", filter_config.get("bad_frame", {}).get("enabled", True)))
+    camera_options = dict(width=camera_width, height=camera_height, reject_bad_frames=reject_bad_frames,
+                          frame_timeout=runtime_config.get("rtsp_frame_timeout_seconds", 10),
+                          startup_timeout=runtime_config.get("rtsp_startup_timeout_seconds", 60))
 
     log.info("[%s] Process started. Connecting RTSP...", cam_id)
     transports = ("tcp", "udp")
     transport_index = 0
-    cam = Camera(rtsp_link, transports[transport_index], width=camera_width, height=camera_height, reject_bad_frames=reject_bad_frames)
+    cam = Camera(rtsp_link, transports[transport_index], **camera_options)
 
+    frame = None
     preview_deadline = time.time() + 5
     while not stop_event.is_set() and time.time() < preview_deadline:
         frame = cam.get_data()
@@ -1038,7 +1042,7 @@ def camera_process_worker(
             break
         time.sleep(0.1)
 
-    log.info("[%s] RTSP ready. Loading model...", cam_id)
+    log.info("[%s] RTSP preview %s. Loading model...", cam_id, "received" if frame is not None else "pending")
     model, names, is_openvino = load_model(model_config, inference_threads)
     warn_unknown_classes(names, class_config)
     device = prediction_device(model_config, is_openvino)
@@ -1076,33 +1080,42 @@ def camera_process_worker(
                 t_after_get = time.time()
 
                 if frame is None:
+                    if no_frame_counter == 0:
+                        unavailable = np.zeros((frame_height, frame_width, 3), dtype=np.uint8)
+                        cv2.putText(unavailable, f"{cam_id}: stream unavailable / reconnecting", (30, 80),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                        put_latest_display_frame(display_queue, (cam_id, unavailable))
                     if not cam.is_opened():
                         transport_index = (transport_index + 1) % len(transports)
-                        log.warning("[%s] RTSP not open. Reconnecting via %s in 5 seconds.", cam_id, transports[transport_index])
+                        log.warning("[%s] RTSP stopped or stale (frame_seq=%s frame_age=%.1fs). Reconnecting via %s in 5 seconds.",
+                                    cam_id, cam.frame_seq, cam.frame_age(), transports[transport_index])
                         cam.release()
                         time.sleep(5)
-                        cam = Camera(rtsp_link, transports[transport_index], width=camera_width, height=camera_height, reject_bad_frames=reject_bad_frames)
+                        cam = Camera(rtsp_link, transports[transport_index], **camera_options)
                         no_frame_counter = 0
                         first_no_frame_time = None
                         last_no_frame_log = 0
                         continue
 
                     no_frame_counter += 1
-                    now_ts = time.time()
+                    now_ts = time.monotonic()
                     if first_no_frame_time is None:
                         first_no_frame_time = now_ts
                     elapsed_no_frame = now_ts - first_no_frame_time
-                    remaining = max(0, int(reconnect_after_seconds - elapsed_no_frame))
+                    remaining = cam.frame_wait_remaining()
+                    if cam.frame_seq > 0:
+                        remaining = min(reconnect_after_seconds - elapsed_no_frame, remaining)
+                    remaining = max(0, int(remaining))
                     if no_frame_counter == 1 or now_ts - last_no_frame_log >= 15:
                         log.warning("[%s] Waiting for RTSP frame. Reconnect in %s seconds.", cam_id, remaining)
                         last_no_frame_log = now_ts
 
-                    if elapsed_no_frame >= reconnect_after_seconds:
+                    if cam.frame_seq > 0 and elapsed_no_frame >= reconnect_after_seconds:
                         transport_index = (transport_index + 1) % len(transports)
                         log.error("[%s] No frame for %s seconds. Reconnecting via %s.", cam_id, reconnect_after_seconds, transports[transport_index])
                         cam.release()
                         time.sleep(0.5)
-                        cam = Camera(rtsp_link, transports[transport_index], width=camera_width, height=camera_height, reject_bad_frames=reject_bad_frames)
+                        cam = Camera(rtsp_link, transports[transport_index], **camera_options)
                         no_frame_counter = 0
                         first_no_frame_time = None
                         last_no_frame_log = 0
@@ -1300,7 +1313,7 @@ def camera_process_worker(
                 if t_after_record - last_perf_log >= 10:
                     loop_total = t_after_record - t_start
                     log.info(
-                        "[%s] perf get=%.3fs resize=%.3fs predict=%.3fs crop=%.3fs post=%.3fs display=%.3fs record=%.3fs total=%.3fs fps=%.2f candidates=%s intrusions=%s",
+                        "[%s] perf get=%.3fs resize=%.3fs predict=%.3fs crop=%.3fs post=%.3fs display=%.3fs record=%.3fs total=%.3fs fps=%.2f candidates=%s intrusions=%s frame_seq=%s frame_age=%.3fs",
                         cam_id,
                         t_after_get - t_start,
                         t_after_resize - t_after_get,
@@ -1313,6 +1326,8 @@ def camera_process_worker(
                         1.0 / loop_total if loop_total > 0 else 0,
                         len(candidate_bboxes),
                         len(intrusion_bboxes),
+                        cam.frame_seq,
+                        cam.frame_age(),
                     )
                     last_perf_log = t_after_record
 
@@ -1398,11 +1413,11 @@ def main():
                 cleanup_runtime_outputs()
                 last_cleanup_time = time.time()
 
-            while not display_queue.empty():
+            for _ in range(len(cameras) * 2):
                 try:
                     cam_id, frame = display_queue.get_nowait()
                     latest_frames[cam_id] = frame
-                except Exception:
+                except queue.Empty:
                     break
 
             if display_enabled:
